@@ -1,0 +1,26 @@
+{
+  "Comment": "AWS EventBridge rule: hit the public pipeline webhook every 4 hours. Replace DOMAIN and SECRET.",
+  "Name": "applyforme-run",
+  "ScheduleExpression": "rate(4 hours)",
+  "State": "ENABLED",
+  "Targets": [
+    {
+      "Id": "1",
+      "Arn": "arn:aws:events:REGION:ACCOUNT:api-destination/applyforme-pipeline",
+      "RoleArn": "arn:aws:iam::ACCOUNT:role/EventBridgeApiDestinationRole",
+      "HttpParameters": {
+        "HeaderParameters": {
+          "Authorization": "Bearer PIPELINE_WEBHOOK_SECRET",
+          "Content-Type": "application/json"
+        }
+      },
+      "Input": "{\"stage\":\"run\",\"limit\":40,\"async\":true}"
+    }
+  ],
+  "_setup_notes": [
+    "1. Create an API Destination pointing to https://YOUR_DOMAIN/api/pipeline/webhook (POST)",
+    "2. Connection auth type: API Key or include Bearer in header parameters as above",
+    "3. Keep EC2 security group: inbound 80/443 from 0.0.0.0/0 (or CloudFront); 8787 closed",
+    "4. Prefer the on-box SCHEDULE_RUN cron (no AWS fees) unless you need multi-region triggers"
+  ]
+}

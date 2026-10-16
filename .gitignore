@@ -1,0 +1,32 @@
+# Secrets & personal data (never commit)
+.env
+.env.*
+!.env.example
+profile.yaml
+resume.pdf
+resume.txt
+*.pem
+
+# Runtime / generated
+data/
+output/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# Python
+.venv/
+venv/
+
+# Next.js dashboard
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

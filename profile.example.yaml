@@ -1,0 +1,98 @@
+# Copy to profile.yaml and fill in. This is the ONLY source of truth the agents use.
+# They are instructed never to invent facts that are not here.
+# Set false (or remove) to force the dashboard onboarding wizard.
+onboarding_complete: false
+personal:
+  first_name: Jane
+  last_name: Doe
+  email: jane@example.com
+  phone: "+91 9999999999"
+  location: Bengaluru, India
+  linkedin: https://linkedin.com/in/janedoe
+  github: https://github.com/janedoe
+  website: ""
+
+resume_path: ./resume.pdf        # PDF uploaded to application forms
+
+summary: >
+  Backend engineer with 4 years of experience building data pipelines and APIs.
+
+skills: [Python, SQL, AWS, Docker, FastAPI]
+
+experience:
+  - company: Acme Corp
+    title: Software Engineer
+    start: 2022-06
+    end: present
+    highlights:
+      - Built ingestion pipeline processing 2M events/day
+      - Cut API latency by 40%
+
+education:
+  - school: Example University
+    degree: B.Tech Computer Science
+    year: 2022
+
+preferences:
+  # What you want NEXT (agents filter discovery + scoring around this).
+  # seniority_level: intern | junior | mid | senior | lead | executive
+  # Junior seekers never see Senior/Staff/Principal/Lead/Director titles.
+  seniority_level: mid
+  current_title: Software Engineer
+  years_experience: 4
+  target_titles: [Backend Engineer, Software Engineer, Data Engineer]
+  locations: [Remote, Bengaluru]
+  # "Remote" roles that mention any of these are dropped (they're usually "Remote, US only").
+  # A role that also names one of your accepted places (e.g. "Bengaluru or Remote US") is kept.
+  reject_locations: [US, USA, United States, Canada, UK, Europe]
+  remote_only: false
+  min_match_score: 70            # 0-100, jobs below are skipped
+  exclude_keywords: [intern]     # seniority filter adds senior/staff/... automatically when junior
+
+# Answers to common screening questions (used verbatim when asked)
+screening:
+  work_authorization: "Yes, authorized to work in India"
+  requires_sponsorship: "No"
+  notice_period: "30 days"
+  expected_salary: ""            # leave empty to be flagged for manual input
+  years_of_experience: "4"
+  gender: "Decline to self-identify"
+  veteran_status: "Decline to self-identify"
+  disability_status: "Decline to self-identify"
+  # Standard yes/no answers the form-filler may reuse. Only keep what is TRUE for you.
+  over_18: "Yes"
+  background_check_ok: "Yes"
+  previously_employed_by_company: "No"
+  how_did_you_hear: "Online job board"
+
+# Used for salary fields. If a posting shows a range the agent answers with its midpoint,
+# otherwise salary_expectation; it never goes below salary_range_min. Hourly = annual / 2080.
+compensation:
+  salary_currency: INR
+  salary_expectation: ""
+  salary_range_min: ""
+  salary_range_max: ""
+
+# Optional: search job boards too (needs `pip install python-jobspy`).
+# Their terms restrict scraping (LinkedIn especially) - keep it small. Aggregator-only
+# listings are collected/scored/tailored but you apply to them manually via the link.
+# searches:
+#   - term: backend engineer
+#     location: Bengaluru, India
+#     sites: [indeed, google]
+#     results_wanted: 25
+#     hours_old: 72
+
+# Companies to watch: board slug on each ATS
+sources:
+  greenhouse: [stripe, airbnb]
+  lever: [spotify]
+  ashby: [notion]
+  # Workday career sites (public JSON search, no browser). Find the three values in the careers URL:
+  #   https://<tenant>.<wdN>.myworkdayjobs.com/<site_id>   ->  base_url = https://<tenant>.<wdN>.myworkdayjobs.com
+  # You tailor + apply manually for these (Workday requires an account), they show up as "Apply manually".
+  workday:
+    - name: NVIDIA
+      base_url: https://nvidia.wd5.myworkdayjobs.com
+      tenant: nvidia
+      site_id: NVIDIAExternalCareerSite

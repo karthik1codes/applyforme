@@ -1,0 +1,17 @@
+[Unit]
+Description=applyforme pipeline worker (cron + webhooks)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/applyforme
+EnvironmentFile=/opt/applyforme/.env
+ExecStart=/opt/applyforme/.venv/bin/python -m applyforme serve --host 127.0.0.1 --port 8787
+Restart=always
+RestartSec=5
+# Playwright / Chromium often need these on headless servers
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
