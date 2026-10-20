@@ -89,6 +89,15 @@ SCHEDULE_INBOX=30 */6 * * *
 JOB_RETENTION_DAYS=10
 ```
 
+If `OPENAI_API_KEY` starts with `sk-or-v1-`, it is an OpenRouter key, not an
+OpenAI key. Add both lines or resume parsing and every LLM step will fail with
+`401 invalid_api_key`:
+
+```dotenv
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+APPLYFORME_MODEL=openai/gpt-4o-mini
+```
+
 Generate the two secrets on the instance if they are empty or commented out:
 
 ```bash
