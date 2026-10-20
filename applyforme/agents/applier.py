@@ -354,6 +354,15 @@ def _wait_linkedin_login(
     """
     if not force and not _linkedin_needs_auth(page):
         return True
+    if not _headed() and not firecrawl_enabled():
+        msg = (
+            "LinkedIn sign-in required — this worker runs headless, so there is no window "
+            "to sign in. Use a Firecrawl live-view session or sign in once in a headed "
+            "browser; the agent will reuse that profile."
+        )
+        print(f"[applier] {msg}")
+        _write_live(job, page, "linkedin_login", msg)
+        return False
     secs = _linkedin_login_sec()
     if deadline is not None:
         secs = min(secs, max(15, int(_deadline_left(deadline))))
@@ -1360,7 +1369,7 @@ def apply(
     try:
         # A cancellation that arrived before this process started wins over a
         # prepare run.  Prepare explicitly clears a stale flag in the dashboard.
-        if store.apply_cancel_requested(job.id):
+        if store.is_apply_cancelled(job.id):
             # Cancel wins over a submit flag: the user asked us to stop before
             # this process crossed the submit boundary.
             store.clear_apply_cancel(job.id)
@@ -1729,7 +1738,7 @@ def _apply_in_browser(
 ) -> tuple[str, str]:
     machine = machine or ApplyStateMachine(store, job.id, owner=_owner_tag(), max_steps=_max_apply_steps())
     answer_cache: dict[str, str] = {}
-    target = (job.apply_url or job.url).strip()
+    target = job.target_url()
     if not target:
         machine.transition(ApplyState.FAILED, result="no_target", detail="job has no apply URL")
         return "errors", "job has no apply URL"

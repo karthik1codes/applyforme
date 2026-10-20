@@ -80,6 +80,18 @@ class Job(BaseModel):
     company_linkedin: str = ""
     company_info: dict = Field(default_factory=dict)
 
+    def target_url(self) -> str:
+        """URL the applier should open.
+
+        Keep LinkedIn postings on LinkedIn so the agent can use Easy Apply; an
+        ``apply_url`` from the board often points at the employer ATS and would
+        skip LinkedIn entirely. Non-LinkedIn jobs still prefer the direct ATS URL.
+        """
+        url = (self.url or "").strip()
+        if "linkedin.com" in url.lower():
+            return url
+        return (self.apply_url or url).strip()
+
 
 class MatchResult(BaseModel):
     score: int

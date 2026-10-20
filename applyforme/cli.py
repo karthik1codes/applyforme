@@ -275,7 +275,7 @@ def cmd_apply(a) -> None:
             print("Job missing or not tailored yet (run `tailor` first).")
             continue
         job = Job.model_validate_json(row["job_json"])
-        target = (job.apply_url or job.url or "").strip()
+        target = job.target_url()
         print(f"\n=== {job.title} @ {job.company} ===\n{target}")
         if not target:
             msg = "no posting URL to open in the browser"

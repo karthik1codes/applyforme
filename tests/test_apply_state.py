@@ -13,6 +13,7 @@ from applyforme.apply_state import (
     Cancelled,
     LoopDetected,
 )
+from applyforme.models import Job, Profile, Tailored
 from applyforme.store import Store
 
 
@@ -110,6 +111,48 @@ def test_cancel_is_immediate_and_persisted(tmp_path):
         m.check_cancel()
     assert m.state is ApplyState.CANCELLED
     assert (store.apply_session("job-cancel") or {})["state"] == "CANCELLED"
+
+
+def test_apply_preflight_honours_a_cancel_request(tmp_path):
+    """The preflight must use the Store cancel API, not an old/renamed method."""
+    from applyforme.agents.applier import apply
+
+    store = make_store(tmp_path)
+    resume = tmp_path / "resume.pdf"
+    resume.write_bytes(b"%PDF-1.4\n")
+    profile = Profile(personal={}, resume_path=str(resume))
+    job = Job(id="test:cancel:1", ats="test", company="Acme", title="Engineer", url="https://example.test/job")
+    store.request_apply_cancel(job.id)
+
+    result, note = apply(job, profile, Tailored(cover_letter="hello"), store=store, dry_run=True)
+
+    assert result == "cancelled"
+    assert "cancel" in note.lower()
+    assert not store.is_apply_cancelled(job.id)
+
+
+def test_linkedin_postings_keep_the_linkedin_target():
+    job = Job(
+        id="linkedin:1",
+        ats="linkedin",
+        company="Acme",
+        title="Engineer",
+        url="https://www.linkedin.com/jobs/view/1",
+        apply_url="https://acme.test/apply",
+    )
+    assert job.target_url() == "https://www.linkedin.com/jobs/view/1"
+
+
+def test_non_linkedin_postings_prefer_the_direct_apply_url():
+    job = Job(
+        id="glassdoor:1",
+        ats="glassdoor",
+        company="Acme",
+        title="Engineer",
+        url="https://www.glassdoor.com/job-listing/j?jl=1",
+        apply_url="https://acme.test/apply",
+    )
+    assert job.target_url() == "https://acme.test/apply"
 
 
 def test_one_worker_owns_an_application_lock(tmp_path):

@@ -28,7 +28,7 @@ def _profile_name() -> str:
 
 
 def job_target(job: Job) -> str:
-    target = (job.apply_url or job.url or "").strip()
+    target = job.target_url()
     if not target:
         raise RuntimeError("Job has no apply_url or url — cannot crawl")
     return target
