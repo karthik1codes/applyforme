@@ -419,15 +419,39 @@ def _wait_linkedin_login(
 
 
 def _click_easy_apply(page: Page) -> bool:
-    """Open LinkedIn Easy Apply modal only (not external company Apply)."""
+    """Open LinkedIn Easy Apply modal only (not external company Apply).
+
+    The button must belong to the **main job card**, not to one of the
+    "similar jobs" cards in the side rail.  Clicking a similar-jobs card
+    opens a completely different posting, and the agent would then fill
+    somebody else's application form.  The main card is the first
+    ``jobs-apply-button`` inside the job detail pane.
+    """
     import re
 
-    candidates = [
-        page.get_by_role("button", name=re.compile(r"easy apply", re.I)),
-        page.get_by_role("link", name=re.compile(r"easy apply", re.I)),
-        page.locator("button[aria-label*='Easy Apply' i]"),
-        page.locator("button.jobs-apply-button:has-text('Easy Apply')"),
+    # Scope to the main job detail pane so the side rail is excluded.
+    panes = [
+        page.locator("div.scaffold-layout__main"),
+        page.locator("main"),
+        page.locator("div.jobs-search__main-content"),
     ]
+    scoped = []
+    for pane in panes:
+        try:
+            if pane.count():
+                scoped.append(pane.first)
+        except Exception:
+            continue
+
+    candidates = []
+    for root in scoped or [page]:
+        candidates += [
+            root.get_by_role("button", name=re.compile(r"easy apply", re.I)),
+            root.locator("button[aria-label*='Easy Apply' i]"),
+            root.locator("button.jobs-apply-button:has-text('Easy Apply')"),
+        ]
+    candidates.append(page.get_by_role("link", name=re.compile(r"easy apply", re.I)))
+
     for loc in candidates:
         try:
             if loc.count() and loc.first.is_visible():
@@ -437,6 +461,69 @@ def _click_easy_apply(page: Page) -> bool:
         except Exception:
             continue
     return False
+
+
+def _linkedin_job_id(url: str) -> str:
+    """Extract the LinkedIn job id from a job URL.
+
+    ``/jobs/view/4479232422`` and ``?currentJobId=4479232422`` both carry the
+    id.  A search-results URL also carries a ``currentJobId`` — that is the
+    id of whichever card is selected, which is how a wrong job is detected.
+    """
+    u = (url or "").strip()
+    if not u:
+        return ""
+    m = re.search(r"/jobs/view/(\d{6,})", u)
+    if m:
+        return m.group(1)
+    m = re.search(r"[?&]currentJobId=(\d{6,})", u)
+    if m:
+        return m.group(1)
+    m = re.search(r"/jobs/view/[^/]*?(\d{6,})", u)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _wrong_job_reason(job: Job, target: str, page_url: str, body_text: str = "") -> str:
+    """Return why the open page is not the job we were asked to apply to.
+
+    Two things go wrong on LinkedIn, both observed in a live run:
+
+    * The agent clicks "Easy Apply" on a **similar jobs** card in the side
+      rail, so the browser walks through a completely different posting.
+    * The "Next" control of the search-results page advances the carousel to
+      the next card, so the job id changes on every wizard step.
+
+    Either way the agent would fill somebody else's application form.  The
+    guard compares the job id in the target URL with the job id of the page
+    that is actually open.
+    """
+    want = _linkedin_job_id(target)
+    if not want:
+        return ""  # not a LinkedIn posting; nothing to compare
+    have = _linkedin_job_id(page_url or "")
+    if have and have != want:
+        return (
+            f"the browser opened a different LinkedIn job ({have}) instead of the "
+            f"target posting ({want}) — refusing to fill the wrong application"
+        )
+    # A search-results URL without a selected card is also not the posting.
+    if not have and "/jobs/search-results" in (page_url or "").lower():
+        return (
+            "the browser is on a LinkedIn search-results page instead of the "
+            f"target posting ({want}) — refusing to fill the wrong application"
+        )
+    return ""
+
+
+def _page_shows_target_job(page: Page, job: Job, target: str) -> str:
+    """Check the open page still belongs to the job we were asked to apply to."""
+    try:
+        url = page.url or ""
+    except Exception:
+        url = ""
+    return _wrong_job_reason(job, target, url, page_body_text(page, 1500))
 
 
 def _click_external_apply(page: Page) -> bool:
@@ -1669,6 +1756,16 @@ def _handle_submit(
         _watch_filled_form(page, job, _watch_seconds(), deadline)
         return "filled", dry_run_note
 
+    # Final gate before anything is submitted: the open page must still be
+    # the job we were asked to apply to.  A submission is irreversible, so a
+    # page that drifted to another posting must stop here.
+    wrong = _page_shows_target_job(page, job, job.target_url())
+    if wrong:
+        machine.transition(ApplyState.HUMAN_INTERVENTION_REQUIRED, result="wrong_job", detail=wrong)
+        _write_live(job, page, "manual", wrong)
+        store.clear_apply_authorization(job.id)
+        return "manual", wrong
+
     if machine.submission_already_recorded():
         machine.transition(ApplyState.ALREADY_SUBMITTED, result="already", detail="confirmed submission already recorded")
         return "applied", "application was already confirmed; not submitting again"
@@ -1868,6 +1965,13 @@ def _apply_in_browser(
                 machine.last_error = note
                 return "manual", note
             machine.transition(ApplyState.APPLICATION_PAGE_READY, result="auth_ok", detail="signed in")
+        # Signing in can land on a search-results page with a *different* job
+        # selected.  Never fill that one.
+        wrong = _page_shows_target_job(page, job, target)
+        if wrong:
+            machine.transition(ApplyState.HUMAN_INTERVENTION_REQUIRED, result="wrong_job", detail=wrong)
+            _write_live(job, page, "manual", wrong)
+            return "manual", wrong
         if _easy_apply_modal_open(page):
             easy = True
             print("[applier] LinkedIn Easy Apply modal already open")
@@ -1875,6 +1979,12 @@ def _apply_in_browser(
             _write_live(job, page, "easy_apply", "Looking for Easy Apply…")
             easy = _click_easy_apply(page)
             wait_for_page_ready(page, timeout_ms=6000)
+            # The click can open a different posting (similar-jobs rail).
+            wrong = _page_shows_target_job(page, job, target)
+            if wrong:
+                machine.transition(ApplyState.HUMAN_INTERVENTION_REQUIRED, result="wrong_job", detail=wrong)
+                _write_live(job, page, "manual", wrong)
+                return "manual", wrong
         if easy:
             print("[applier] LinkedIn Easy Apply opened")
             if _linkedin_needs_auth(page):
@@ -1945,6 +2055,16 @@ def _apply_in_browser(
 
     for step in range(max_steps):
         machine.check_cancel()
+        # Before every wizard step, confirm the page is still the job we were
+        # asked to apply to.  On a LinkedIn search-results page the "Next"
+        # control walks the carousel to the *next* posting, so the job id
+        # changes on every step.  Without this check the agent fills a
+        # stranger's application form.
+        wrong = _page_shows_target_job(page, job, target)
+        if wrong:
+            machine.transition(ApplyState.HUMAN_INTERVENTION_REQUIRED, result="wrong_job", detail=wrong)
+            _write_live(job, page, "manual", wrong)
+            return "manual", wrong
         machine.observe(page_signature(page))
         machine.transition(ApplyState.FORM_FILLING, result="fill", detail=f"form step {step + 1}")
         _write_live(job, page, "filling", f"Form step {step + 1}")
@@ -2027,6 +2147,13 @@ def _apply_in_browser(
 
     # Single-page form or wizard ended without an explicit control.
     machine.transition(ApplyState.FORM_VALIDATING, result="final", detail="no further wizard control")
+    # Last guard before anything can be submitted: the page must still be
+    # the job we were asked to apply to.
+    wrong = _page_shows_target_job(page, job, target)
+    if wrong:
+        machine.transition(ApplyState.HUMAN_INTERVENTION_REQUIRED, result="wrong_job", detail=wrong)
+        _write_live(job, page, "manual", wrong)
+        return "manual", wrong
     errors, empty = validate_form(page)
     if empty or errors:
         detail = "; ".join((errors + [f"required: {x}" for x in empty]))[:500]
