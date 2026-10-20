@@ -166,6 +166,18 @@ grep -q '^JOB_RETENTION_DAYS=' .env || echo 'JOB_RETENTION_DAYS=10' >> .env
 chmod 600 .env
 ```
 
+`profile.yaml` is gitignored and is **not** in the repo. Without it, the
+dashboard's onboarding/profile pages throw `ENOENT`. `setup.sh` creates it from
+`profile.example.yaml` when missing. To create it manually:
+
+```bash
+cd /opt/applyforme
+cp profile.example.yaml profile.yaml
+chown ec2-user:ec2-user profile.yaml
+```
+
+The onboarding wizard fills in the real values.
+
 If `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` are present, add this exact
 redirect URI in Google:
 

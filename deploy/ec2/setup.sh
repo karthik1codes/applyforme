@@ -169,6 +169,14 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
   chown "$USER_NAME:$USER_NAME" "$APP_DIR/.env"
 fi
 
+# profile.yaml is gitignored. Without it the dashboard's onboarding/profile
+# pages throw ENOENT. Start from the example; onboarding fills it in.
+if [[ ! -f "$APP_DIR/profile.yaml" && -f "$APP_DIR/profile.example.yaml" ]]; then
+  cp "$APP_DIR/profile.example.yaml" "$APP_DIR/profile.yaml"
+  chown "$USER_NAME:$USER_NAME" "$APP_DIR/profile.yaml"
+  echo "Created $APP_DIR/profile.yaml from profile.example.yaml"
+fi
+
 SECRET=$(openssl rand -hex 32)
 AUTH=$(openssl rand -hex 32)
 ensure_env() {
