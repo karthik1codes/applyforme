@@ -419,99 +419,136 @@ def _wait_linkedin_login(
 
 
 def _click_easy_apply(page: Page, target_job_id: str = "") -> bool:
-    """Open LinkedIn Easy Apply modal only (not external company Apply).
+    """Open the Apply control of the **target** posting on LinkedIn.
 
-    The button must belong to the **target posting**, not to one of the
-    "similar jobs" cards in the side rail.  Clicking a similar-jobs card
-    opens a completely different posting, and the agent would then fill
+    The button must belong to the posting we were asked to apply to, not to
+    one of the "similar jobs" cards in the side rail.  Clicking a similar-jobs
+    card opens a completely different posting, and the agent would then fill
     somebody else's application form — observed live on job 4479232422.
 
-    So the button is located by *id*: we look for the job card that
-    references the target job id and click the Apply button inside that
-    card.  Only if that fails do we fall back to the main pane, and the
-    caller re-checks the job id after the click.
+    The button is located by id: we start from the target posting's own link
+    and stay inside the card that holds only that posting.  An unscoped
+    "Apply" lookup is never used, because the similar-jobs rail has one too.
     """
     import re
 
     if target_job_id:
-        try:
-            marked = page.evaluate(
-                _EASY_APPLY_TARGET_JS, {"jobId": target_job_id, "marker": "data-afm-easy-apply"}
-            )
-        except Exception:
-            marked = False
-        if marked:
+        for prefer_easy in (True, False):
             try:
-                loc = page.locator("[data-afm-easy-apply]")
+                marked = page.evaluate(
+                    _EASY_APPLY_TARGET_JS,
+                    {"jobId": target_job_id, "marker": "data-afm-apply", "preferEasy": prefer_easy},
+                )
+            except Exception:
+                marked = False
+            if not marked:
+                continue
+            try:
+                loc = page.locator("[data-afm-apply]")
                 if loc.count() and loc.first.is_visible():
                     loc.first.click(timeout=5000)
-                    page.wait_for_timeout(2000)
+                    page.wait_for_timeout(2500)
                     return True
             except Exception:
                 pass
 
-    # Scope to the main job detail pane so the side rail is excluded.
+    # No job id (or the id-scoped lookup failed): fall back to a scoped
+    # Easy Apply lookup, but never to an unscoped one.
     panes = [
         page.locator("div.scaffold-layout__main"),
+        page.locator("section.jobs-top-card"),
         page.locator("main"),
-        page.locator("div.jobs-search__main-content"),
     ]
-    scoped = []
     for pane in panes:
         try:
-            if pane.count():
-                scoped.append(pane.first)
-        except Exception:
-            continue
-
-    candidates = []
-    for root in scoped or [page]:
-        candidates += [
-            root.get_by_role("button", name=re.compile(r"easy apply", re.I)),
-            root.locator("button[aria-label*='Easy Apply' i]"),
-            root.locator("button.jobs-apply-button:has-text('Easy Apply')"),
-        ]
-    candidates.append(page.get_by_role("link", name=re.compile(r"easy apply", re.I)))
-
-    for loc in candidates:
-        try:
-            if loc.count() and loc.first.is_visible():
-                loc.first.click(timeout=5000)
-                page.wait_for_timeout(2000)
-                return True
+            if not pane.count():
+                continue
+            root = pane.first
+            locs = [
+                root.get_by_role("button", name=re.compile(r"easy apply", re.I)),
+                root.locator("button[aria-label*='Easy Apply' i]"),
+                root.locator("button.jobs-apply-button:has-text('Easy Apply')"),
+            ]
+            for loc in locs:
+                if loc.count() and loc.first.is_visible():
+                    loc.first.click(timeout=5000)
+                    page.wait_for_timeout(2500)
+                    return True
         except Exception:
             continue
     return False
 
 
-# Marks the Apply button that belongs to the job card referencing the target
-# job id.  The card is found by walking up from a link to that posting, so a
-# "similar jobs" card can never be selected.
+# Finds and marks the Apply button that belongs to the **target** posting.
+#
+# Live DOM facts (measured with scripts/probe_linkedin_dom.py against the
+# real posting, not guessed):
+#   * A LinkedIn job page has no ``[data-entity-urn*="jobPosting:"]`` card and
+#     no ``scaffold-layout__main`` / ``jobs-top-card`` container.
+#   * The target posting's Apply control is a standalone
+#     ``<a aria-label="Apply on company website">Apply</a>`` that is *not*
+#     inside a job link.
+#   * Each card of the "similar jobs" rail is an ``<a href="/jobs/view/<other
+#     id>">`` that *wraps* its own Apply button.  Clicking that button is
+#     what opened the wrong posting.
+#
+# So the rule is: an Apply control is a candidate only when it is NOT inside
+# a job link to a different posting.  Everything else on the page is fair
+# game, and the caller re-checks the job id after the click.
 _EASY_APPLY_TARGET_JS = """
-({ jobId, marker }) => {
+({ jobId, marker, preferEasy }) => {
   const want = String(jobId || '').trim();
   if (!want) return false;
-  const path = `/jobs/view/${want}`;
-  const links = Array.from(document.querySelectorAll(`a[href*="${path}"]`));
-  if (!links.length) return false;
-  const isApply = (el) => {
-    const t = ((el.innerText || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase();
-    return t.includes('easy apply') || el.className.includes('jobs-apply-button');
-  };
-  for (const link of links) {
-    let node = link;
-    for (let up = 0; up < 12 && node; up++) {
-      const buttons = Array.from(node.querySelectorAll('button, a')).filter(isApply);
-      const hit = buttons.find((b) => b.offsetParent !== null);
-      if (hit) {
-        hit.setAttribute(marker, '1');
-        hit.scrollIntoView({ block: 'center' });
-        return true;
-      }
-      node = node.parentElement;
+  const easyFirst = preferEasy !== false;
+  const label = (el) => ((el.innerText || el.textContent || '') + ' '
+    + (el.getAttribute('aria-label') || '')).replace(/\\s+/g, ' ').trim().toLowerCase();
+  // The element's OWN text, ignoring nested badges.  A "similar jobs" card
+  // is a link whose innerText contains an "Easy Apply" badge, but its own
+  // text is the job title — so a badge must not make the card look like an
+  // Easy Apply button.
+  const ownLabel = (el) => {
+    let own = '';
+    for (const n of Array.from(el.childNodes)) {
+      if (n.nodeType === 3) own += n.nodeValue || '';
     }
-  }
-  return false;
+    own = (own + ' ' + (el.getAttribute('aria-label') || '')).replace(/\\s+/g, ' ').trim().toLowerCase();
+    if (own) return own;
+    return (el.getAttribute('aria-label') || '').toLowerCase();
+  };
+  const jobIdOf = (el) => {
+    const m = ((el.getAttribute && el.getAttribute('href')) || '').match(/\\/jobs\\/view\\/(\\d{6,})/);
+    return m ? m[1] : '';
+  };
+  const isApply = (el) => {
+    const t = ownLabel(el);
+    if (!t) return false;
+    if (t.includes('easy apply')) return true;
+    // Strict: the control's own label must *be* an Apply control.  A job card
+    // in the rail also contains the word "Apply" somewhere in its text, so
+    // the label has to start with it.
+    if (t.startsWith('apply')) return true;
+    return String(el.className || '').includes('jobs-apply-button');
+  };
+  const isEasy = (el) => ownLabel(el).includes('easy apply');
+  // A control wrapped by a link to a *different* posting belongs to that
+  // posting (the similar-jobs rail).  Never click those.
+  const isForeign = (el) => {
+    const host = el.closest('a[href*="/jobs/view/"]');
+    if (!host) return false;
+    const id = jobIdOf(host);
+    return !!id && id !== want;
+  };
+  const cands = Array.from(document.querySelectorAll('button, a')).filter(
+    (b) => isApply(b) && !isForeign(b) && b.offsetParent !== null);
+  if (!cands.length) return false;
+  // Easy mode only accepts a real "Easy Apply" control; external mode only
+  // accepts a plain Apply control.  Neither falls back to the other.
+  const btn = easyFirst ? cands.find(isEasy)
+                        : (cands.find((b) => !isEasy(b)) || null);
+  if (!btn) return false;
+  btn.setAttribute(marker, '1');
+  btn.scrollIntoView({ block: 'center' });
+  return true;
 }
 """
 
@@ -579,31 +616,69 @@ def _page_shows_target_job(page: Page, job: Job, target: str) -> str:
     return _wrong_job_reason(job, target, url, page_body_text(page, 1500))
 
 
-def _click_external_apply(page: Page) -> bool:
-    """Company-site Apply (opens external ATS). Returns True if a new navigation/tab likely started."""
+def _click_external_apply(page: Page, target_job_id: str = "") -> bool:
+    """Company-site Apply (opens external ATS). Returns True if a new navigation/tab likely started.
+
+    Like Easy Apply, this must be the button of the **target** posting.  The
+    "similar jobs" rail on a LinkedIn job page carries its own Apply buttons,
+    and clicking one of those opens a different posting entirely.  The
+    id-scoped lookup is tried first; only then is a scoped fallback used.
+    """
     import re
 
-    # Prefer buttons that are NOT Easy Apply
-    locs = [
-        page.get_by_role("button", name=re.compile(r"^\s*apply\s*$", re.I)),
-        page.get_by_role("link", name=re.compile(r"^\s*apply\s*$", re.I)),
-        page.locator("a.jobs-apply-button, button.jobs-apply-button"),
-    ]
     before = list(page.context.pages)
-    for loc in locs:
+
+    if target_job_id:
         try:
-            if not loc.count() or not loc.first.is_visible():
+            marked = page.evaluate(
+                _EASY_APPLY_TARGET_JS,
+                {"jobId": target_job_id, "marker": "data-afm-apply", "preferEasy": False},
+            )
+        except Exception:
+            marked = False
+        if marked:
+            try:
+                loc = page.locator("[data-afm-apply]")
+                if loc.count() and loc.first.is_visible():
+                    loc.first.click(timeout=5000)
+                    page.wait_for_timeout(2500)
+                    after = page.context.pages
+                    if len(after) > len(before):
+                        after[-1].bring_to_front()
+                    return True
+            except Exception:
+                pass
+
+    # Prefer buttons that are NOT Easy Apply, but only inside a known job
+    # pane — never page-wide.
+    panes = [
+        page.locator("div.scaffold-layout__main"),
+        page.locator("section.jobs-top-card"),
+        page.locator("main"),
+    ]
+    for pane in panes:
+        try:
+            if not pane.count():
                 continue
-            text = ((loc.first.inner_text() or "") + " " + (loc.first.get_attribute("aria-label") or "")).lower()
-            if "easy apply" in text:
-                continue
-            loc.first.click(timeout=5000)
-            page.wait_for_timeout(2500)
-            # New tab?
-            after = page.context.pages
-            if len(after) > len(before):
-                after[-1].bring_to_front()
-            return True
+            root = pane.first
+            locs = [
+                root.get_by_role("button", name=re.compile(r"^\s*apply\s*$", re.I)),
+                root.get_by_role("link", name=re.compile(r"^\s*apply\s*$", re.I)),
+                root.locator("a.jobs-apply-button, button.jobs-apply-button"),
+                root.locator("[aria-label*='Apply on company website' i]"),
+            ]
+            for loc in locs:
+                if not loc.count() or not loc.first.is_visible():
+                    continue
+                text = ((loc.first.inner_text() or "") + " " + (loc.first.get_attribute("aria-label") or "")).lower()
+                if "easy apply" in text:
+                    continue
+                loc.first.click(timeout=5000)
+                page.wait_for_timeout(2500)
+                after = page.context.pages
+                if len(after) > len(before):
+                    after[-1].bring_to_front()
+                return True
         except Exception:
             continue
     return False
@@ -2082,7 +2157,7 @@ def _apply_in_browser(
             print("[applier] No Easy Apply — this posting uses company-site Apply")
             _write_live(job, page, "external_apply", "Opening company Apply page…")
             before_pages = list(page.context.pages)
-            if _click_external_apply(page):
+            if _click_external_apply(page, target_job_id):
                 page = _newest_page(page.context, before_pages)
                 wait_for_page_ready(page, timeout_ms=15000)
                 if _linkedin_needs_auth(page):
@@ -2130,7 +2205,11 @@ def _apply_in_browser(
     # filters) but it is not an application form.  Filling it is how the
     # agent ends up "applying" to whatever card is selected.  The Easy Apply
     # modal is the only place a LinkedIn application form lives.
-    if linkedin and not easy and not _easy_apply_modal_open(page):
+    #
+    # This only applies while the browser is still on linkedin.com: a posting
+    # that says "Apply on company website" sends the browser to the employer's
+    # ATS, and that form is exactly what we want to fill.
+    if linkedin and not easy and _is_linkedin(page.url) and not _easy_apply_modal_open(page):
         detail = (
             "the browser is on a LinkedIn search page, not the Easy Apply form for "
             f"{job.title} — not filling it"

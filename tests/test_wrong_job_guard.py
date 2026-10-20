@@ -103,18 +103,29 @@ def test_a_non_linkedin_job_is_never_blocked():
     assert _wrong_job_reason(job, job.target_url(), "https://boards.greenhouse.io/other/jobs/999") == ""
 
 
+def test_the_search_page_guard_only_applies_on_linkedin():
+    """A posting that opens the employer ATS must still be fillable."""
+    import inspect
+
+    from applyforme.agents.applier import _apply_in_browser
+
+    src = inspect.getsource(_apply_in_browser)
+    assert "_is_linkedin(page.url)" in src
+    assert "not_a_form" in src
+
+
+
 def test_the_easy_apply_button_is_scoped_to_the_target_job_id():
-    """The click must target the card that references the target job id.
+    """The click must target the control that belongs to the target posting.
 
     A similar-jobs card in the side rail also has an "Apply" button; picking
     it opens a different posting.
     """
     from applyforme.agents.applier import _EASY_APPLY_TARGET_JS
 
-    assert "/jobs/view/" in _EASY_APPLY_TARGET_JS
-    assert "jobId" in _EASY_APPLY_TARGET_JS
-    # It must search for a link to the exact posting, not for any Apply text.
-    assert "links" in _EASY_APPLY_TARGET_JS
+    assert "isForeign" in _EASY_APPLY_TARGET_JS
+    # It must recognise a control wrapped by a link to another posting.
+    assert "closest('a[href*=\"/jobs/view/\"]')" in _EASY_APPLY_TARGET_JS
     assert "easy apply" in _EASY_APPLY_TARGET_JS.lower()
 
 
@@ -126,4 +137,38 @@ def test_easy_apply_uses_the_id_scoped_path_first():
 
     sig = inspect.signature(_click_easy_apply)
     assert "target_job_id" in sig.parameters
+
+
+def test_external_apply_is_also_id_scoped():
+    """The company-site Apply button must be the target posting's too."""
+    import inspect
+
+    from applyforme.agents.applier import _click_external_apply
+
+    sig = inspect.signature(_click_external_apply)
+    assert "target_job_id" in sig.parameters
+
+
+def test_the_targeting_script_matches_the_real_linkedin_dom():
+    """The script must work with the DOM that was measured on the live page.
+
+    Measured facts (scripts/probe_linkedin_dom.py against the real posting):
+      * there is no ``[data-entity-urn*="jobPosting:"]`` card,
+      * there is no ``scaffold-layout__main`` / ``jobs-top-card`` container,
+      * the target's Apply control is a standalone
+        ``<a aria-label="Apply on company website">Apply</a>``,
+      * each card of the "similar jobs" rail is an ``<a href="/jobs/view/<other
+        id>">`` that wraps its own Apply button.
+    """
+    from applyforme.agents.applier import _EASY_APPLY_TARGET_JS
+
+    # It must understand the "Apply on company website" label.
+    assert "apply" in _EASY_APPLY_TARGET_JS.lower()
+    # A job card's innerText contains "Apply" too, so the label must be the
+    # element's OWN text, not the nested badge's.
+    assert "ownLabel" in _EASY_APPLY_TARGET_JS
+    assert "childNodes" in _EASY_APPLY_TARGET_JS
+    # Easy mode must not fall back to a plain Apply control and vice versa.
+    assert "cands.find(isEasy)" in _EASY_APPLY_TARGET_JS
+
 
