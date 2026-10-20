@@ -159,6 +159,36 @@ def test_the_agent_waits_for_the_employer_site_redirect():
     assert "wait_for_page_ready" in src
 
 
+def test_an_employer_signup_wall_is_reported_plainly():
+    """Observed live: Internshala shows "Sign up now to unlock" over the form.
+
+    The form is behind the modal, so no field is detectable.  The agent must
+    say the site wants an account, not "no form detected" — and it must not
+    try to create one itself.
+    """
+    from applyforme.agents.applier import _signup_wall_reason
+
+    wall = _signup_wall_reason("Sign up now to unlock\nFREE AI Career Guide worth Rs.599")
+    assert wall is not None
+    assert "account" in wall
+    assert "will not create an account" in wall
+
+    # A normal posting without a wall is not affected.
+    assert _signup_wall_reason("Python Development Internship Digitap.ai Bangalore") is None
+    assert _signup_wall_reason("") is None
+
+
+def test_detect_blocker_classifies_the_signup_wall():
+    """The wall must be reported as a blocker, not as a missing form."""
+    import inspect
+
+    from applyforme.agents.applier import detect_blocker
+
+    src = inspect.getsource(detect_blocker)
+    assert "_signup_wall_reason" in src
+
+
+
 def test_easy_apply_does_not_fall_back_to_an_external_apply_button():
     """Only a real Easy Apply control may return True from _click_easy_apply.
 

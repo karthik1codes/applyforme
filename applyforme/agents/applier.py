@@ -1540,7 +1540,39 @@ def detect_blocker(page: Page) -> tuple[str, str] | None:
         return "mfa", "additional verification / 2FA is required"
     if "access denied" in low or "you don't have permission" in low:
         return "blocked", "the site denied access"
+    # The employer's own site wants an account before the form appears.
+    # Observed live: Internshala shows a "Sign up now to unlock" modal over
+    # the posting, so no form is detectable.  Saying "no form detected"
+    # hides the real reason.
+    if why := _signup_wall_reason(text):
+        return "auth", why
     return None
+
+
+def _signup_wall_reason(page_text: str) -> str | None:
+    """Detect a sign-up / sign-in wall on an employer's site."""
+    low = (page_text or "").lower()
+    if not low:
+        return None
+    signup = any(
+        p in low
+        for p in (
+            "sign up now to unlock",
+            "sign up to apply",
+            "create an account to apply",
+            "login to apply",
+            "log in to apply",
+            "sign in to apply",
+            "register to apply",
+        )
+    )
+    if not signup:
+        return None
+    return (
+        "the employer's site asks you to create an account before the application "
+        "form appears — sign up there yourself (the agent will not create an "
+        "account or enter credentials for you)"
+    )
 
 
 def verify_submission(page: Page, url_before: str, timeout_s: int = 15) -> tuple[str, str]:
@@ -2209,6 +2241,15 @@ def _apply_in_browser(
                 # hop, otherwise the agent would inspect the redirect page and
                 # give up before the real form appears.
                 page = _wait_for_employer_site(page, deadline=deadline)
+                # The employer's site may demand an account before the form
+                # appears.  Report that plainly instead of "no form detected".
+                wall = _signup_wall_reason(page_body_text(page, 4000))
+                if wall:
+                    machine.transition(
+                        ApplyState.HUMAN_INTERVENTION_REQUIRED, result="signup_wall", detail=wall
+                    )
+                    _write_live(job, page, "manual", wall)
+                    return "manual", wall
                 if _linkedin_needs_auth(page):
                     machine.transition(ApplyState.AUTHENTICATION_REQUIRED, result="auth", detail="LinkedIn sign-in required")
                     if not _wait_linkedin_login(page, job, force=True, deadline=deadline, headed=headed):
@@ -2241,13 +2282,19 @@ def _apply_in_browser(
     # ---------------------------------------------------------- form loop
     fields = extract_fields(page)
     if not fields:
+        # A sign-up wall hides the form behind a modal, so no field is
+        # detectable.  Say that instead of "no form detected".
+        wall = _signup_wall_reason(page_body_text(page, 4000))
+        detail = wall or "no form detected on the page"
         machine.transition(
             ApplyState.HUMAN_INTERVENTION_REQUIRED,
-            result="no_form",
-            detail="no form detected on the page",
+            result="signup_wall" if wall else "no_form",
+            detail=detail,
         )
-        _write_live(job, page, "manual", "no form detected — finish in Chromium or retry")
+        _write_live(job, page, "manual", detail)
         _watch_filled_form(page, job, min(45, _watch_seconds() or 45), deadline)
+        if wall:
+            return "manual", wall
         return "manual", "no form detected — use the Chromium window (LinkedIn Easy Apply may need a manual sign-in)"
 
     # A LinkedIn *job listing* page has form fields (the search box, the
