@@ -4,6 +4,10 @@
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/applyforme}"
+# Set WORKER_ONLY=1 to run only the Python worker (no Next.js dashboard, no Node).
+WORKER_ONLY="${WORKER_ONLY:-0}"
+
+trap 'echo "setup.sh failed at line $LINENO — see the error above. If the systemd units are missing, run: sudo bash $APP_DIR/deploy/ec2/install-services.sh" >&2' ERR
 
 # Prefer ec2-user (Amazon Linux); fall back to ubuntu / SUDO_USER
 if [[ -n "${APPLYFORME_USER:-}" ]]; then
@@ -78,22 +82,56 @@ fi
 "$PYTHON3" -m ensurepip --upgrade >/dev/null 2>&1 || true
 echo "Using $PYTHON3 ($("$PYTHON3" -V 2>&1))"
 
-# Node 20
-if ! command -v node >/dev/null || [[ "$(node -v 2>/dev/null | cut -d. -f1 | tr -d v || echo 0)" -lt 20 ]]; then
+# Node 22.14+ + dashboard (not needed for WORKER_ONLY).
+# better-sqlite3 13 uses Node-API 10; Node 20/22 < 22.14 segfaults on first DB open.
+node_ok() {
+  command -v node >/dev/null 2>&1 || return 1
+  local v major minor
+  v="$(node -v 2>/dev/null | sed 's/^v//')"
+  major="${v%%.*}"
+  minor="${v#*.}"; minor="${minor%%.*}"
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+  (( major > 22 || (major == 22 && minor >= 14) ))
+}
+
+if [[ "$WORKER_ONLY" != "1" ]] && ! node_ok; then
   if [[ "$is_amazon" -eq 1 ]]; then
-    curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+    curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
     pkg_install nodejs
   else
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
     pkg_install nodejs
   fi
 fi
+if [[ "$WORKER_ONLY" != "1" ]] && ! node_ok; then
+  echo "ERROR: Node.js 22.14+ is required (found $(node -v 2>/dev/null || echo none))." >&2
+  echo "Node 20 causes better-sqlite3 13 to segfault on the first database open." >&2
+  exit 1
+fi
 
-# npm path for systemd (Amazon Linux often /usr/bin/npm)
-NPM_BIN="$(command -v npm)"
+# npm path for systemd (only used by the web unit)
+NPM_BIN="$(command -v npm || true)"
 
 cd "$APP_DIR"
 chown -R "$USER_NAME:$USER_NAME" "$APP_DIR"
+
+# Install the units before the long Python/Node build so a later failure still
+# leaves them visible in `systemctl status` (inactive) instead of "not found".
+install -m 644 "$APP_DIR/deploy/ec2/applyforme-worker.service" /etc/systemd/system/
+sed -i "s/^User=.*/User=$USER_NAME/" /etc/systemd/system/applyforme-worker.service
+sed -i "s|/opt/applyforme|$APP_DIR|g" /etc/systemd/system/applyforme-worker.service
+
+if [[ "$WORKER_ONLY" == "1" ]]; then
+  # Remove the dashboard unit if a previous run installed it.
+  systemctl disable --now applyforme-web 2>/dev/null || true
+  rm -f /etc/systemd/system/applyforme-web.service
+else
+  install -m 644 "$APP_DIR/deploy/ec2/applyforme-web.service" /etc/systemd/system/
+  sed -i "s/^User=.*/User=$USER_NAME/" /etc/systemd/system/applyforme-web.service
+  sed -i "s|/opt/applyforme|$APP_DIR|g" /etc/systemd/system/applyforme-web.service
+  sed -i "s|/usr/bin/npm|$NPM_BIN|g" /etc/systemd/system/applyforme-web.service
+fi
+systemctl daemon-reload
 
 if [[ -x .venv/bin/python ]] && ! .venv/bin/python -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)' >/dev/null 2>&1; then
   echo "Existing .venv uses an old Python — recreating it"
@@ -114,6 +152,17 @@ sudo -u "$USER_NAME" .venv/bin/playwright install-deps chromium || true
 sudo -u "$USER_NAME" mkdir -p .cache/ms-playwright
 sudo -u "$USER_NAME" env PLAYWRIGHT_BROWSERS_PATH="$APP_DIR/.cache/ms-playwright" \
   .venv/bin/playwright install chromium
+
+# Playwright's install-deps only knows Debian/Ubuntu. On AL2023 install the
+# Chromium runtime libraries one by one so one renamed package can't block all.
+if [[ "$is_amazon" -eq 1 ]]; then
+  for p in nss nspr atk at-spi2-atk at-spi2-core cups-libs libdrm \
+           libXcomposite libXdamage libXrandr mesa-libgbm pango alsa-lib \
+           libXScrnSaver libXcursor libXext libXi libXfixes libXrender \
+           libXtst libxkbcommon cairo dbus-libs glib2 fontconfig liberation-fonts; do
+    pkg_install "$p" >/dev/null 2>&1 || true
+  done
+fi
 
 if [[ ! -f "$APP_DIR/.env" ]]; then
   cp "$APP_DIR/.env.example" "$APP_DIR/.env"
@@ -142,45 +191,46 @@ grep -q '^JOB_RETENTION_DAYS=' "$APP_DIR/.env" || ensure_env JOB_RETENTION_DAYS 
 grep -q '^PYTHONUTF8=' "$APP_DIR/.env" || ensure_env PYTHONUTF8 "1"
 sed -i 's/^AUTH_DISABLED=1/# AUTH_DISABLED=1/' "$APP_DIR/.env" || true
 
-cd "$APP_DIR/dashboard"
-sudo -u "$USER_NAME" "$NPM_BIN" ci || sudo -u "$USER_NAME" "$NPM_BIN" install
-sudo -u "$USER_NAME" "$NPM_BIN" run build
+if [[ "$WORKER_ONLY" != "1" ]]; then
+  cd "$APP_DIR/dashboard"
+  sudo -u "$USER_NAME" "$NPM_BIN" ci || sudo -u "$USER_NAME" "$NPM_BIN" install
+  sudo -u "$USER_NAME" "$NPM_BIN" run build
+fi
 
-install -m 644 "$APP_DIR/deploy/ec2/applyforme-worker.service" /etc/systemd/system/
-install -m 644 "$APP_DIR/deploy/ec2/applyforme-web.service" /etc/systemd/system/
-sed -i "s/^User=.*/User=$USER_NAME/" /etc/systemd/system/applyforme-worker.service
-sed -i "s/^User=.*/User=$USER_NAME/" /etc/systemd/system/applyforme-web.service
-sed -i "s|/opt/applyforme|$APP_DIR|g" /etc/systemd/system/applyforme-worker.service
-sed -i "s|/opt/applyforme|$APP_DIR|g" /etc/systemd/system/applyforme-web.service
-# Point ExecStart at the real npm binary (Amazon Linux)
-sed -i "s|/usr/bin/npm|$NPM_BIN|g" /etc/systemd/system/applyforme-web.service
+systemctl enable --now applyforme-worker
+systemctl restart applyforme-worker
 
-systemctl daemon-reload
-systemctl enable --now applyforme-worker applyforme-web
-systemctl restart applyforme-worker applyforme-web
+if [[ "$WORKER_ONLY" == "1" ]]; then
+  # Worker-only: make sure no dashboard unit or nginx site remains.
+  rm -f /etc/nginx/conf.d/applyforme.conf /etc/nginx/sites-enabled/applyforme
+  systemctl reload nginx 2>/dev/null || true
+else
+  systemctl enable --now applyforme-web
+  systemctl restart applyforme-web
 
-# nginx — Amazon Linux uses conf.d; Ubuntu uses sites-available
-if [[ -f "$APP_DIR/deploy/ec2/nginx.conf" ]]; then
-  PUB_IP=$(curl -fsS --max-time 2 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
-  TMP=$(mktemp)
-  if [[ -n "$PUB_IP" ]]; then
-    sed "s/apply.example.com/_/" "$APP_DIR/deploy/ec2/nginx.conf" > "$TMP"
-  else
-    cp "$APP_DIR/deploy/ec2/nginx.conf" "$TMP"
+  # nginx — Amazon Linux uses conf.d; Ubuntu uses sites-available
+  if [[ -f "$APP_DIR/deploy/ec2/nginx.conf" ]]; then
+    PUB_IP=$(curl -fsS --max-time 2 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
+    TMP=$(mktemp)
+    if [[ -n "$PUB_IP" ]]; then
+      sed "s/apply.example.com/_/" "$APP_DIR/deploy/ec2/nginx.conf" > "$TMP"
+    else
+      cp "$APP_DIR/deploy/ec2/nginx.conf" "$TMP"
+    fi
+    if [[ -d /etc/nginx/sites-available ]]; then
+      cp "$TMP" /etc/nginx/sites-available/applyforme
+      ln -sf /etc/nginx/sites-available/applyforme /etc/nginx/sites-enabled/applyforme
+      rm -f /etc/nginx/sites-enabled/default
+    else
+      # Amazon Linux / RHEL style
+      mkdir -p /etc/nginx/conf.d
+      # Drop default server if present so our config wins
+      [[ -f /etc/nginx/conf.d/default.conf ]] && mv /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.bak || true
+      cp "$TMP" /etc/nginx/conf.d/applyforme.conf
+    fi
+    rm -f "$TMP"
+    nginx -t && systemctl enable --now nginx && systemctl reload nginx
   fi
-  if [[ -d /etc/nginx/sites-available ]]; then
-    cp "$TMP" /etc/nginx/sites-available/applyforme
-    ln -sf /etc/nginx/sites-available/applyforme /etc/nginx/sites-enabled/applyforme
-    rm -f /etc/nginx/sites-enabled/default
-  else
-    # Amazon Linux / RHEL style
-    mkdir -p /etc/nginx/conf.d
-    # Drop default server if present so our config wins
-    [[ -f /etc/nginx/conf.d/default.conf ]] && mv /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.bak || true
-    cp "$TMP" /etc/nginx/conf.d/applyforme.conf
-  fi
-  rm -f "$TMP"
-  nginx -t && systemctl enable --now nginx && systemctl reload nginx
 fi
 
 # Firewall: prefer firewalld on Amazon Linux; ufw on Ubuntu. Security group is primary.
@@ -200,10 +250,18 @@ echo ""
 echo "=== applyforme running on this EC2 instance ==="
 echo "OS user:  $USER_NAME"
 echo "Worker:   systemctl status applyforme-worker"
-echo "Web:      systemctl status applyforme-web"
-echo "Health:   curl -s http://127.0.0.1:8787/health"
-echo ""
-echo "Edit secrets:  sudo nano $APP_DIR/.env"
-echo "Then:          sudo systemctl restart applyforme-worker applyforme-web"
+if [[ "$WORKER_ONLY" == "1" ]]; then
+  echo "Mode:     worker-only (dashboard is not installed)"
+  echo "Health:   curl -s http://127.0.0.1:8787/health"
+  echo ""
+  echo "Edit secrets:  sudo nano $APP_DIR/.env"
+  echo "Then:          sudo systemctl restart applyforme-worker"
+else
+  echo "Web:      systemctl status applyforme-web"
+  echo "Health:   curl -s http://127.0.0.1:8787/health"
+  echo ""
+  echo "Edit secrets:  sudo nano $APP_DIR/.env"
+  echo "Then:          sudo systemctl restart applyforme-worker applyforme-web"
+fi
 echo "SSH as:        ssh -i KEY.pem ec2-user@PUBLIC_IP"
 echo "Security group: 22 / 80 / 443 — do NOT open 8787."

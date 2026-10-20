@@ -1,6 +1,10 @@
 # Deploy & run applyforme on AWS EC2 (Amazon Linux · `ec2-user`)
 
-SSH user is **`ec2-user`** (not `ubuntu`). systemd runs `applyforme-worker` + `applyforme-web` as that user. Port **8787** stays on localhost.
+For the recommended topology and a copy-paste runbook for deployment day, see
+[`deploy/ec2/DEPLOY.md`](DEPLOY.md). Short version: run both the worker and the
+dashboard on EC2, and reach port 3000 through an SSH tunnel.
+
+SSH user is **`ec2-user`** (not `ubuntu`). By default systemd runs `applyforme-worker` + `applyforme-web` as that user. Port **8787** stays on localhost. Set `WORKER_ONLY=1` if the dashboard runs on your laptop.
 
 ## First time on an existing Amazon Linux instance
 
@@ -26,6 +30,104 @@ sudo bash deploy/ec2/setup.sh
 ```
 
 `setup.sh` detects Amazon Linux, installs deps with `dnf`/`yum`, sets `User=ec2-user` in systemd, and configures nginx under `/etc/nginx/conf.d/`.
+
+## `Unit applyforme-worker.service could not be found`
+
+`setup.sh` runs with `set -e`: it stops at the first failure, and the units are installed before the Python/Node build so they stay visible as **inactive** if a later step fails. If they are still missing, the run stopped before Node was installed.
+
+```bash
+cd /opt/applyforme
+
+# What is actually missing?
+ls -l .venv/bin/python dashboard/.next/BUILD_ID 2>&1
+command -v python3.11 node npm
+
+# 1) Install the units unconditionally (safe to re-run)
+sudo bash deploy/ec2/install-services.sh
+```
+
+`install-services.sh` prints the exact remaining commands when the venv or dashboard build is missing. Typical completion:
+
+```bash
+cd /opt/applyforme
+
+# Python 3.11+ (AL2023's default python3 is 3.9 — too old)
+sudo dnf install -y python3.11 python3.11-pip
+rm -rf .venv
+python3.11 -m venv .venv
+.venv/bin/pip install -U pip
+.venv/bin/pip install -r requirements.txt
+PLAYWRIGHT_BROWSERS_PATH=/opt/applyforme/.cache/ms-playwright \
+  .venv/bin/playwright install chromium
+
+# Node 22.14+ (not Node 20 — better-sqlite3 13 segfaults on Node 20)
+sudo dnf remove -y nodejs 2>/dev/null || true
+curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash -
+sudo dnf install -y nodejs
+node -v && npm -v
+
+# Dashboard
+cd dashboard
+npm ci || npm install
+npm run build
+cd ..
+
+# 2) Re-run: installs, enables, starts, and checks health
+sudo bash deploy/ec2/install-services.sh
+
+sudo journalctl -u applyforme-worker -n 80 --no-pager
+```
+
+To capture the original failure next time:
+
+```bash
+sudo bash deploy/ec2/setup.sh 2>&1 | tee /tmp/applyforme-setup.log
+tail -50 /tmp/applyforme-setup.log
+```
+
+## Worker-only (dashboard runs on your laptop)
+
+If only the Python worker should run on EC2:
+
+```bash
+cd /opt/applyforme
+
+# Stop and remove the dashboard service
+sudo systemctl disable --now applyforme-web
+sudo rm -f /etc/systemd/system/applyforme-web.service
+sudo systemctl daemon-reload
+
+# Keep the worker enabled/running
+sudo systemctl enable --now applyforme-worker
+curl -s http://127.0.0.1:8787/health
+```
+
+Use worker-only mode on future setup/update runs so the dashboard is not reinstalled:
+
+```bash
+cd /opt/applyforme
+sudo env WORKER_ONLY=1 bash deploy/ec2/setup.sh
+# or, if the units already exist:
+sudo env WORKER_ONLY=1 bash deploy/ec2/install-services.sh
+```
+
+The worker binds `127.0.0.1:8787`, so from your laptop open an SSH tunnel:
+
+```bash
+ssh -i ~/.ssh/your-key.pem -N -L 8787:127.0.0.1:8787 ec2-user@YOUR_EC2_IP
+```
+
+Then set your **local** dashboard `.env`:
+
+```dotenv
+PIPELINE_WORKER_URL=http://127.0.0.1:8787
+PIPELINE_WEBHOOK_SECRET=<same value as /opt/applyforme/.env on EC2>
+```
+
+> **Database caveat:** the local dashboard reads `data/applyforme.db`
+> (or `APPLYFORME_DB`). The EC2 worker writes `/opt/applyforme/data/applyforme.db`.
+> Those are separate SQLite files — sync the DB from EC2, or the local dashboard
+> won't show the jobs the EC2 worker fetched.
 
 ## After setup — secrets & restart
 
