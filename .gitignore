@@ -3,6 +3,8 @@
 .env.*
 !.env.example
 profile.yaml
+profile.yaml.bak
+*.bak
 resume.pdf
 resume.txt
 *.pem

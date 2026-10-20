@@ -77,6 +77,16 @@ CREATE TABLE IF NOT EXISTS linkedin_oauth_states (
   expires_at TEXT,
   consumed_at TEXT
 );
+-- Live Firecrawl cloud browser sessions (mirrors applyforme/store.py).  A
+-- Firecrawl profile has one exclusive writer, so an abandoned session would
+-- block every later Apply with HTTP 409.
+CREATE TABLE IF NOT EXISTS firecrawl_sessions (
+  session_id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  profile TEXT,
+  created_at REAL,
+  last_seen_at REAL
+);
 `;
 
 const g = globalThis as unknown as { __afmDb?: Database.Database };

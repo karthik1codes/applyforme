@@ -17,6 +17,7 @@ type LiveMeta = {
   age_sec?: number;
   engine?: string;
   live_view_url?: string;
+  interactive_live_view_url?: string;
 };
 
 /** Polls the agent's Chromium screenshots so you can watch Apply like a user. */
@@ -93,19 +94,19 @@ export function ApplyLiveViewer({ jobId, force }: { jobId?: string; force?: bool
         )}
         {meta.live_view_url && (
           <a
-            href={meta.live_view_url}
+            href={meta.interactive_live_view_url || meta.live_view_url}
             target="_blank"
             rel="noreferrer"
             className="block truncate text-xs text-sky-600 hover:underline"
           >
-            Open Firecrawl live view
+            Open Firecrawl live view (click and type here to sign in)
           </a>
         )}
         <div className={cn("relative aspect-[16/10] overflow-hidden rounded-lg border bg-zinc-100 dark:bg-zinc-900")}>
           {meta.live_view_url ? (
             <iframe
-              key={meta.live_view_url}
-              src={meta.live_view_url}
+              key={meta.interactive_live_view_url || meta.live_view_url}
+              src={meta.interactive_live_view_url || meta.live_view_url}
               title="Firecrawl live browser"
               className="h-full w-full border-0"
               allow="clipboard-read; clipboard-write"

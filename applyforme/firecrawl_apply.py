@@ -1,90 +1,88 @@
-"""Firecrawl crawl-first Apply: land on the exact job URL, open Apply, LLM-fill fields.
+"""Firecrawl cloud browser Apply.
 
-Flow:
-  1) scrape(exact job_url) uncached + persistent profile
-  2) interact → force that URL + click Easy Apply / Apply
-  3) CDP Playwright → force goto again + existing LLM field fill / submit
-  4) interact assist if Playwright cannot see Next/Submit
+How this works, and why it is shaped this way
+--------------------------------------------
+Firecrawl exposes two browser entry points:
+
+* **Scrape -> Interact** — ``POST /v2/scrape`` returns a ``scrapeId`` and
+  ``POST /v2/scrape/{scrapeId}/interact`` runs actions in the browser bound to
+  that scrape.
+* **Browser Sandbox** — ``POST /v2/interact`` starts a standalone session
+  that needs no prior scrape and hands back a raw CDP websocket url.
+
+Both return the same three urls:
+
+* ``cdpUrl``                — raw Chrome DevTools Protocol websocket
+* ``liveViewUrl``           — watch the session
+* ``interactiveLiveViewUrl``— click/type in the session (this is what lets the
+  user sign in to LinkedIn by hand)
+
+The decisive constraint is the **profile write lock**: a named persistent
+profile has exactly one writer (``profile.saveChanges = true``).  While our
+session is alive, any other session on that profile is rejected with::
+
+    HTTP 409  Browser operation conflicts with the current session or profile state.
+
+The old implementation used scrape + interact and therefore had three
+problems that produced the observed "run again and it fails again" loop:
+
+1. The scrape-bound session id and the browser session id are different
+   objects, and the old code could leave the browser session alive.  The next
+   run then hit HTTP 409 on its first ``interact`` call and died.
+2. It used ``interact(prompt=...)``, i.e. an AI agent driving the browser
+   (7 credits/minute, nondeterministic), to do things our own Playwright code
+   already does deterministically and for 2 credits/minute.
+3. It read ``cdp_url`` off an ``interact`` response, so a session that only
+   existed because of a scrape had to be kept alive just to get a CDP url.
+
+This implementation instead:
+
+* opens **one** standalone session it owns (:func:`open_apply_session`),
+  records the id in the shared store, and always releases it in ``finally``;
+* drives the whole application flow with the same deterministic local
+  Playwright code used for the local browser, over the CDP websocket — no AI
+  browser agent in the loop;
+* surfaces the interactive live view so the user can sign in to LinkedIn
+  themselves while the session waits;
+* reclaims a stale session left by a crashed run, so one crash cannot wedge
+  the profile for every later run.
 """
 from __future__ import annotations
 
-import json
-import os
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from playwright.sync_api import sync_playwright
 
 from .browser_runtime import ensure_playwright_browsers_path
-from .firecrawl_browser import firecrawl_api_key
+from .firecrawl_browser import (
+    firecrawl_api_key,
+    open_apply_session,
+    profile_name,
+)
 from .models import Job, Profile, Tailored
 
 LiveWriter = Callable[..., None]
 
 
 def _profile_name() -> str:
-    return (os.getenv("FIRECRAWL_BROWSER_PROFILE") or "applyforme").strip() or "applyforme"
+    return profile_name()
 
 
 def job_target(job: Job) -> str:
     target = job.target_url()
     if not target:
-        raise RuntimeError("Job has no apply_url or url — cannot crawl")
+        raise RuntimeError("Job has no apply_url or url — cannot apply")
     return target
 
 
-def _scrape_id(doc: Any) -> str:
-    meta = getattr(doc, "metadata", None) or getattr(doc, "metadata_typed", None)
-    sid = getattr(meta, "scrape_id", None) if meta is not None else None
-    if not sid and isinstance(meta, dict):
-        sid = meta.get("scrape_id") or meta.get("scrapeId")
-    if not sid and hasattr(doc, "model_dump"):
-        sid = (doc.model_dump().get("metadata") or {}).get("scrape_id")
-    return (sid or "").strip()
-
-
-def _candidate_brief(job: Job, profile: Profile, tailored: Tailored) -> dict:
-    p = profile.personal or {}
-    return {
-        "job_url": job_target(job),
-        "job_title": job.title,
-        "company": job.company,
-        "location": job.location,
-        "name": p.get("name") or p.get("full_name") or "",
-        "email": p.get("email") or "",
-        "phone": p.get("phone") or "",
-        "linkedin": p.get("linkedin") or p.get("linkedin_url") or "",
-        "city": p.get("city") or p.get("location") or "",
-        "skills": (profile.skills or [])[:40],
-        "screening": profile.screening or {},
-        "compensation": profile.compensation or {},
-        "cover_letter": (tailored.cover_letter or "")[:2500],
-        "why_company": (tailored.why_this_company or "")[:800],
-        "summary": (profile.summary or "")[:800],
-    }
-
-
-def _close_prior_sessions(app: Any) -> None:
-    try:
-        listed = app.list_browsers(status="active")
-        for s in getattr(listed, "sessions", None) or []:
-            sid = getattr(s, "id", None)
-            if sid:
-                try:
-                    app.delete_browser(sid)
-                    print(f"[firecrawl] closed prior browser session {sid}")
-                except Exception:
-                    pass
-    except Exception as e:
-        print(f"[firecrawl] prior session cleanup skipped: {e}")
-
-
-def _interact(app: Any, scrape_id: str, *, prompt: str, timeout: int = 120) -> Any:
-    return app.interact(scrape_id, prompt=prompt, timeout=timeout)
-
-
 def _urls_match(expected: str, actual: str) -> bool:
+    """True when two URLs point at the same posting.
+
+    Used by diagnostics to confirm the browser really landed on the requested
+    job rather than a similar-looking page.
+    """
     if not expected or not actual:
         return False
     from urllib.parse import urlparse
@@ -115,192 +113,115 @@ def crawl_apply(
     write_live: LiveWriter | None = None,
     machine=None,
 ) -> tuple[str, str]:
-    """Crawl the exact job URL with Firecrawl, then LLM-fill via CDP Playwright."""
+    """Apply with a Firecrawl cloud browser driven over CDP."""
     from .agents import applier as ap
 
     ensure_playwright_browsers_path()
-    key = firecrawl_api_key()
-    if not key:
+    if not firecrawl_api_key():
         raise RuntimeError("FIRECRAWL_API_KEY missing")
 
-    from firecrawl import Firecrawl
-
     target = job_target(job)
-    brief = _candidate_brief(job, profile, tailored)
-    app = Firecrawl(api_key=key)
-    # Never delete other Apply sessions.  Each run owns only the session it
-    # creates below; the old sweep killed concurrent users' browsers.
+    print(f"[firecrawl] opening cloud browser session (profile={_profile_name()!r})\n  {target}")
 
-    print(f"[firecrawl] scraping EXACT job URL (uncached):\n  {target}")
-    if write_live:
-        write_live(job, None, "opening", f"Firecrawl scrape → {target}", live_view_url="", engine="firecrawl")
+    session = open_apply_session(store=store, job_id=job.id)
+    live = session.live_view_url
+    interactive = session.interactive_live_view_url or session.live_view_url
 
-    doc = app.scrape(
-        target,
-        formats=["markdown"],
-        wait_for=3000,
-        timeout=120_000,
-        max_age=0,
-        store_in_cache=False,
-        profile={"name": _profile_name(), "save_changes": True},
-    )
-    scrape_id = _scrape_id(doc)
-    if not scrape_id:
-        raise RuntimeError("Firecrawl scrape returned no scrape_id — cannot interact")
-    print(f"[firecrawl] scrape_id={scrape_id}")
-
-    live = ""
-    cdp = ""
-    try:
-        boot = _interact(
-            app,
-            scrape_id,
-            prompt=(
-                f"CRITICAL: Open exactly this URL and wait until the job page is fully loaded:\n{target}\n\n"
-                "Do not search. Do not open a different job. Do not go to Home/Feed. "
-                "Dismiss cookie banners. Reply with the final URL."
-            ),
-            timeout=120,
-        )
-        live = getattr(boot, "interactive_live_view_url", None) or getattr(boot, "live_view_url", None) or ""
-        cdp = getattr(boot, "cdp_url", None) or ""
-        print(f"[firecrawl] live view: {live or '(none)'}")
+    def _live(phase: str, note: str) -> None:
         if write_live:
-            write_live(job, None, "loaded", f"Crawler on job page — clicking Apply", live_view_url=live, engine="firecrawl")
-
-        apply_prompt = f"""You are applying to ONE specific job.
-
-EXACT JOB URL (stay on this posting or its apply modal):
-{target}
-
-Candidate (use only these facts later when filling — for now just open the form):
-{json.dumps(brief, ensure_ascii=False)[:3200]}
-
-Steps NOW:
-1. If not on that URL, navigate to it.
-2. Click "Easy Apply" if present; else "Apply" / "Apply now" (never Save/Follow/Message).
-3. If a sign-in wall appears, reply exactly: LOGIN_REQUIRED
-4. Do NOT submit the application yet. Stop when the form/modal is open.
-"""
-        apply_res = _interact(app, scrape_id, prompt=apply_prompt, timeout=150)
-        cdp = getattr(apply_res, "cdp_url", None) or cdp
-        live = (
-            getattr(apply_res, "interactive_live_view_url", None)
-            or getattr(apply_res, "live_view_url", None)
-            or live
-        )
-        blob = " ".join(
-            str(x)
-            for x in (
-                getattr(apply_res, "result", None),
-                getattr(apply_res, "stdout", None),
-                getattr(apply_res, "output", None),
-            )
-            if x
-        )
-        if "LOGIN_REQUIRED" in blob.upper():
-            if write_live:
-                write_live(
-                    job,
-                    None,
-                    "manual",
-                    "Login required — use Firecrawl live view",
-                    live_view_url=live,
-                    engine="firecrawl",
-                )
-            return (
-                "manual",
-                "Firecrawl hit a login wall — sign in via the live view, then click Apply with agent again",
+            write_live(
+                job, None, phase, note,
+                live_view_url=live,
+                interactive_live_view_url=interactive,
+                engine="firecrawl",
             )
 
-        if not cdp:
-            ping = _interact(app, scrape_id, prompt="Stay on the current page and report the URL.", timeout=60)
-            cdp = getattr(ping, "cdp_url", None) or ""
-            live = getattr(ping, "interactive_live_view_url", None) or live
-        if not cdp:
-            raise RuntimeError("Firecrawl interact did not return a cdp_url")
+    try:
+        _live("opening", f"Firecrawl browser → {target}")
 
         deadline = time.time() + ap._apply_timeout_sec()
         print(f"[firecrawl] apply timeout={ap._apply_timeout_sec()}s")
 
         with sync_playwright() as pw:
-            browser = pw.chromium.connect_over_cdp(cdp)
+            browser = pw.chromium.connect_over_cdp(session.cdp_url)
             try:
                 ctx = browser.contexts[0] if browser.contexts else browser.new_context(
                     viewport={"width": 1280, "height": 900}
                 )
                 page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
-                # If Easy Apply is already open, do NOT goto — that dismisses the modal.
-                modal_open = False
-                try:
-                    modal_open = ap._easy_apply_modal_open(page)
-                except Exception:
-                    modal_open = False
-
-                if modal_open:
-                    print("[firecrawl] Easy Apply modal already open — skipping goto")
-                    skip_goto = True
-                else:
-                    skip_goto = False
-                    for attempt in range(2):
+                # A LinkedIn sign-in wall is expected on a fresh profile.  The
+                # user signs in by hand through the interactive live view;
+                # we never type their password and never inject cookies.
+                if ap._is_linkedin(target) and ap._linkedin_needs_auth(page):
+                    note = (
+                        "Sign in to LinkedIn in the live view below (including any 2FA) — "
+                        "the agent will not ask for your password."
+                    )
+                    print(f"[firecrawl] {note}")
+                    _live("linkedin_login", note)
+                    try:
+                        signed_in = ap._wait_linkedin_login(
+                            page, job, force=True, deadline=deadline, headed=True
+                        )
+                    except TimeoutError:
+                        signed_in = False
+                    if not signed_in:
+                        msg = ap._linkedin_auth_note(headed=True)
                         if machine is not None:
-                            machine.check_cancel()
-                        print(f"[firecrawl] forcing goto ({attempt + 1}/2) → {target}")
-                        page.goto(target, wait_until="domcontentloaded", timeout=90_000)
-                        ap.wait_for_page_ready(page, timeout_ms=8000)
-                        if _urls_match(target, page.url or ""):
-                            break
-                print(f"[firecrawl] browser URL: {page.url}")
-
-                if write_live:
-                    write_live(
-                        job,
-                        page,
-                        "filling",
-                        f"Exact job loaded — LLM filling ({page.url})",
-                        live_view_url=live,
-                        engine="firecrawl",
-                    )
-
-                # Do NOT call Firecrawl interact while CDP is connected — it tears
-                # down the remote page and causes "Target page has been closed".
-                try:
-                    return ap._apply_in_browser(
-                        page,
-                        job,
-                        profile,
-                        tailored,
-                        resume=resume,
-                        store=store,
-                        dry_run=dry_run,
-                        auto_submit=auto_submit,
-                        ask_terminal=ask_terminal,
-                        headed=True,
-                        deadline=deadline,
-                        skip_initial_goto=skip_goto,
-                        machine=machine,
-                    )
-                except TimeoutError as e:
-                    msg = str(e)
-                    print(f"[firecrawl] {msg}")
+                            machine.last_error = msg
+                        return "manual", msg
                     if write_live:
-                        write_live(job, None, "timeout", msg[:180], live_view_url=live, engine="firecrawl")
-                    return "errors", msg
+                        write_live(
+                            job, page, "linkedin_ok", "Signed in to LinkedIn — continuing",
+                            live_view_url=live,
+                            interactive_live_view_url=interactive,
+                            engine="firecrawl",
+                        )
+
+                # The local flow knows how to reach the apply form, fill it,
+                # validate it and wait for review.  Reuse it verbatim so both
+                # engines behave identically.
+                return ap._apply_in_browser(
+                    page,
+                    job,
+                    profile,
+                    tailored,
+                    resume=resume,
+                    store=store,
+                    dry_run=dry_run,
+                    auto_submit=auto_submit,
+                    ask_terminal=ask_terminal,
+                    headed=True,
+                    deadline=deadline,
+                    machine=machine,
+                )
+            except TimeoutError as e:
+                msg = str(e)
+                print(f"[firecrawl] {msg}")
+                _live("timeout", msg[:180])
+                return "errors", msg
             finally:
-                # Disconnect CDP client only — stop_interaction owns the remote browser.
+                # Disconnect our CDP client only; the session owner releases
+                # the remote browser below.
                 try:
                     browser.close()
                 except Exception:
                     pass
     finally:
-        try:
-            app.stop_interaction(scrape_id)
-        except Exception:
-            pass
-        if write_live:
+        session.close()
+        if store is not None:
             try:
-                write_live(job, None, "done", "Firecrawl apply session closed", live_view_url="", engine="firecrawl")
+                store.forget_firecrawl_sessions([session.id])
             except Exception:
                 pass
-        print(f"[firecrawl] stopped interaction {scrape_id}")
+        if write_live:
+            try:
+                write_live(
+                    job, None, "done", "Firecrawl apply session closed",
+                    live_view_url="", interactive_live_view_url="",
+                    engine="firecrawl",
+                )
+            except Exception:
+                pass
+        print("[firecrawl] session released")

@@ -175,6 +175,44 @@ grep -q '^JOB_RETENTION_DAYS=' .env || echo 'JOB_RETENTION_DAYS=10' >> .env
 chmod 600 .env
 ```
 
+### LinkedIn Easy Apply on a headless worker
+
+LinkedIn postings are opened on LinkedIn rather than the employer ATS, so the
+agent can use Easy Apply. A headless EC2 worker cannot show LinkedIn's sign-in
+window, though. If `FIRECRAWL_API_KEY` is set, the worker automatically uses
+Firecrawl for LinkedIn listings and keeps its live view open while you sign in;
+the agent continues as soon as the session is ready.
+
+1. Keep `APPLYFORME_BROWSER_HEADED=0`.
+2. Set `FIRECRAWL_API_KEY=fc-...` and, optionally,
+   `APPLYFORME_LINKEDIN_ENGINE=firecrawl` (`auto` already selects Firecrawl for
+   LinkedIn on a headless worker).
+3. Click **Prepare application**, then open the **Firecrawl live view** shown on
+   the job page and finish LinkedIn sign-in/2FA there.
+4. The Firecrawl profile (`FIRECRAWL_BROWSER_PROFILE`, default `applyforme`)
+   keeps the session for later LinkedIn applications.
+
+How the Firecrawl session works, and why it used to fail:
+
+* A Firecrawl browser profile has **exactly one writer**. While a session is
+  alive on a profile, any other session on that profile is rejected with
+  `HTTP 409 Browser operation conflicts with the current session or profile state`.
+* The agent now opens **one** standalone session (`POST /v2/interact`), records
+  it in SQLite, and always releases it in a `finally` block. A session left
+  behind by a crashed run is reclaimed automatically on the next run, so one
+  crash can no longer wedge the profile for every later application.
+* The whole form flow runs over the returned CDP websocket using the same
+  deterministic Playwright code as the local browser. No AI browser agent is in
+  the loop (2 credits/minute instead of 7).
+* Only sessions that this installation created are ever reclaimed, and only
+  when they are idle **and** their job no longer holds a live apply lock.
+  Concurrent applications are never disturbed.
+
+Use `APPLYFORME_LINKEDIN_ENGINE=playwright` only when the worker has a display,
+or when a signed-in persistent `data/browser` profile has been copied to it.
+Without a Firecrawl key or a session, the worker returns a clear "LinkedIn
+sign-in required" note instead of waiting on a login window it cannot show.
+
 `profile.yaml` is gitignored and is **not** in the repo. Without it, the
 dashboard's onboarding/profile pages throw `ENOENT`. `setup.sh` creates it from
 `profile.example.yaml` when missing. To create it manually:

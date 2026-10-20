@@ -36,7 +36,7 @@ from ..browser_runtime import (
 )
 from ..captcha import captcha_solved_on_page, detect_captcha, wait_for_manual_captcha
 from ..field_map import map_fields, unknown_required
-from ..firecrawl_browser import apply_engine, firecrawl_enabled
+from ..firecrawl_browser import apply_engine, firecrawl_enabled, firecrawl_for_job
 from ..llm import ask_json
 from ..models import FieldAnswer, FormField, Job, Profile, Tailored
 from ..store import Store
@@ -205,6 +205,7 @@ def _write_live(
     note: str = "",
     *,
     live_view_url: str = "",
+    interactive_live_view_url: str = "",
     engine: str = "",
 ) -> None:
     """Snapshot for the dashboard live viewer (PNG and/or Firecrawl liveView iframe)."""
@@ -225,6 +226,12 @@ def _write_live(
         "headed": _headed(),
         "engine": engine or prev.get("engine") or apply_engine(),
         "live_view_url": live_view_url or prev.get("live_view_url") or "",
+        "interactive_live_view_url": (
+            interactive_live_view_url
+            or prev.get("interactive_live_view_url")
+            or prev.get("live_view_url")
+            or ""
+        ),
     }
     if _page_alive(page):
         try:
@@ -342,19 +349,25 @@ def _nudge_linkedin_email_signin(page: Page) -> None:
                 continue
 
 
-def _linkedin_auth_note() -> str:
+def _linkedin_auth_note(*, headed: bool | None = None) -> str:
     """Explain a LinkedIn auth failure in terms the current worker can act on."""
-    if not _headed() and not firecrawl_enabled():
+    visible = _headed() if headed is None else headed
+    if not visible and not firecrawl_enabled():
         return (
             "LinkedIn sign-in required — this worker runs headless, so there is no window "
             "to sign in. Use a Firecrawl live-view session or sign in once in a headed "
             "browser; then click Prepare again."
         )
-    return "Sign-in timed out — sign in once in the browser window, then click Prepare again"
+    return "Sign-in timed out — finish signing in, then click Prepare again"
 
 
 def _wait_linkedin_login(
-    page: Page, job: Job, *, force: bool = False, deadline: float | None = None
+    page: Page,
+    job: Job,
+    *,
+    force: bool = False,
+    deadline: float | None = None,
+    headed: bool | None = None,
 ) -> bool:
     """Wait for the user to sign in to LinkedIn in the visible Chromium window.
 
@@ -365,7 +378,8 @@ def _wait_linkedin_login(
     """
     if not force and not _linkedin_needs_auth(page):
         return True
-    if not _headed() and not firecrawl_enabled():
+    visible = _headed() if headed is None else headed
+    if not visible and not firecrawl_enabled():
         msg = (
             "LinkedIn sign-in required — this worker runs headless, so there is no window "
             "to sign in. Use a Firecrawl live-view session or sign in once in a headed "
@@ -1427,7 +1441,8 @@ def apply(
         _mark_profile_ready(machine, resume.name)
 
         try:
-            if firecrawl_enabled():
+            firecrawl_error: str | None = None
+            if firecrawl_for_job(job.target_url()):
                 try:
                     return _apply_via_firecrawl(
                         job, profile, tailored,
@@ -1438,18 +1453,26 @@ def apply(
                 except (Cancelled, LoopDetected, BudgetExceeded):
                     raise
                 except Exception as e:
-                    err = str(e)
-                    print(f"[applier] Firecrawl apply failed ({err}) — falling back to local Playwright")
+                    firecrawl_error = str(e)
+                    print(f"[applier] Firecrawl apply failed ({firecrawl_error}) — falling back to local Playwright")
                     try:
                         kill_stale_apply_browsers()
                     except Exception:
                         pass
-            return _apply_via_local_playwright(
+            res, note = _apply_via_local_playwright(
                 job, profile, tailored,
                 resume=resume, store=store, dry_run=dry_run,
                 auto_submit=auto_submit, ask_terminal=ask_terminal,
                 machine=machine,
             )
+            # If Firecrawl was the requested engine and it failed, the local
+            # fallback on a headless worker cannot show a sign-in window.
+            # Say so plainly instead of reporting a misleading auth error.
+            if firecrawl_error and res == "manual" and not _headed():
+                note = (
+                    f"{note} (Firecrawl engine failed: {firecrawl_error[:200]})"
+                )
+            return res, note
         except Cancelled as e:
             # Consume the cancellation flag so the next explicit prepare can
             # start cleanly; the job status stays "cancelled" until then.
@@ -1816,8 +1839,8 @@ def _apply_in_browser(
         if kind == "auth" or (linkedin and _linkedin_needs_auth(page)):
             machine.transition(ApplyState.AUTHENTICATION_REQUIRED, result="auth", detail=why)
             _write_live(job, page, "linkedin_login", why)
-            if not _wait_linkedin_login(page, job, force=True, deadline=deadline):
-                note = _linkedin_auth_note()
+            if not _wait_linkedin_login(page, job, force=True, deadline=deadline, headed=headed):
+                note = _linkedin_auth_note(headed=headed)
                 machine.last_error = note
                 return "manual", note
             machine.transition(ApplyState.APPLICATION_PAGE_READY, result="auth_ok", detail="signed in")
@@ -1840,8 +1863,8 @@ def _apply_in_browser(
     if linkedin:
         if _linkedin_needs_auth(page):
             machine.transition(ApplyState.AUTHENTICATION_REQUIRED, result="auth", detail="LinkedIn sign-in required")
-            if not _wait_linkedin_login(page, job, force=True, deadline=deadline):
-                note = _linkedin_auth_note()
+            if not _wait_linkedin_login(page, job, force=True, deadline=deadline, headed=headed):
+                note = _linkedin_auth_note(headed=headed)
                 machine.last_error = note
                 return "manual", note
             machine.transition(ApplyState.APPLICATION_PAGE_READY, result="auth_ok", detail="signed in")
@@ -1856,8 +1879,8 @@ def _apply_in_browser(
             print("[applier] LinkedIn Easy Apply opened")
             if _linkedin_needs_auth(page):
                 machine.transition(ApplyState.AUTHENTICATION_REQUIRED, result="auth", detail="sign-in modal after Apply")
-                if not _wait_linkedin_login(page, job, force=True, deadline=deadline):
-                    note = _linkedin_auth_note()
+                if not _wait_linkedin_login(page, job, force=True, deadline=deadline, headed=headed):
+                    note = _linkedin_auth_note(headed=headed)
                     machine.last_error = note
                     return "manual", note
                 # Re-open the job page without losing the sign-in; never trust
@@ -1875,8 +1898,8 @@ def _apply_in_browser(
                 wait_for_page_ready(page, timeout_ms=15000)
                 if _linkedin_needs_auth(page):
                     machine.transition(ApplyState.AUTHENTICATION_REQUIRED, result="auth", detail="LinkedIn sign-in required")
-                    if not _wait_linkedin_login(page, job, force=True, deadline=deadline):
-                        note = _linkedin_auth_note()
+                    if not _wait_linkedin_login(page, job, force=True, deadline=deadline, headed=headed):
+                        note = _linkedin_auth_note(headed=headed)
                         machine.last_error = note
                         return "manual", note
             else:

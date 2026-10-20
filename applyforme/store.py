@@ -103,6 +103,16 @@ CREATE TABLE IF NOT EXISTS linkedin_oauth_states (
   expires_at TEXT,
   consumed_at TEXT
 );
+-- Live Firecrawl cloud browser sessions.  A profile has one exclusive writer,
+-- so an abandoned session would block every later run with HTTP 409.  We
+-- record our own sessions here so a crashed run can be reclaimed.
+CREATE TABLE IF NOT EXISTS firecrawl_sessions (
+  session_id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  profile TEXT,
+  created_at REAL,
+  last_seen_at REAL
+);
 """
 
 MIGRATIONS = [
@@ -485,6 +495,69 @@ class Store:
     def is_apply_cancelled(self, job_id: str) -> bool:
         row = self.db.execute("SELECT cancel_requested FROM apply_sessions WHERE job_id=?", (job_id,)).fetchone()
         return bool(row and row["cancel_requested"])
+
+    # ---- Firecrawl cloud browser sessions --------------------------------
+    #
+    # A Firecrawl browser profile has exactly one writer.  A session left
+    # behind by a crashed run keeps the profile locked and every later run
+    # fails with HTTP 409.  We record our own sessions so the next run can
+    # reclaim a provably stale one instead of wedging forever.
+
+    def remember_firecrawl_session(self, job_id: str, session_id: str, profile: str = "") -> None:
+        import time as _time
+
+        now = _time.time()
+        self.db.execute(
+            "INSERT INTO firecrawl_sessions (session_id, job_id, profile, created_at, last_seen_at) "
+            "VALUES (?,?,?,?,?) "
+            "ON CONFLICT(session_id) DO UPDATE SET last_seen_at=excluded.last_seen_at",
+            (session_id, job_id, profile, now, now),
+        )
+        self.db.commit()
+
+    def touch_firecrawl_session(self, session_id: str) -> None:
+        import time as _time
+
+        self.db.execute(
+            "UPDATE firecrawl_sessions SET last_seen_at=? WHERE session_id=?",
+            (_time.time(), session_id),
+        )
+        self.db.commit()
+
+    def forget_firecrawl_sessions(self, session_ids: list[str]) -> None:
+        if not session_ids:
+            return
+        marks = ",".join("?" for _ in session_ids)
+        self.db.execute(f"DELETE FROM firecrawl_sessions WHERE session_id IN ({marks})", tuple(session_ids))
+        self.db.commit()
+
+    def firecrawl_session_is_stale(
+        self, session_id: str, *, stale_sec: float = 900.0, now: float | None = None
+    ) -> bool:
+        """True when this recorded session is abandoned and may be reclaimed.
+
+        A session is stale only when it has not been touched for ``stale_sec``
+        and the job that owned it no longer holds a live apply lock.  A run
+        that is still going keeps its lock, so its session is never reclaimed.
+        """
+        import time as _time
+
+        now = _time.time() if now is None else now
+        row = self.db.execute(
+            "SELECT job_id, last_seen_at FROM firecrawl_sessions WHERE session_id=?", (session_id,)
+        ).fetchone()
+        if not row:
+            return False
+        last_seen = float(row["last_seen_at"] or 0)
+        if last_seen and (now - last_seen) < float(stale_sec):
+            return False
+        job_id = row["job_id"]
+        lock = self.db.execute(
+            "SELECT lock_owner, lock_expires_at FROM apply_sessions WHERE job_id=?", (job_id,)
+        ).fetchone()
+        if lock and lock["lock_owner"] and float(lock["lock_expires_at"] or 0) > now:
+            return False  # a live run still owns it
+        return True
 
     def authorize_apply(self, job_id: str, by: str = "dashboard") -> None:
         """Record explicit user authorization to submit THIS job once."""
