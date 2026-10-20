@@ -92,6 +92,10 @@ if [[ ! -x "$APP_DIR/.venv/bin/python" ]]; then
 elif ! sudo -u "$USER_NAME" env PYTHONPATH="$APP_DIR" "$APP_DIR/.venv/bin/python" -c 'import applyforme.cli' >/dev/null 2>&1; then
   echo "! The venv exists but 'import applyforme.cli' fails — pip install did not finish."
   missing=1
+elif ! sudo -u "$USER_NAME" env PYTHONPATH="$APP_DIR" "$APP_DIR/.venv/bin/python" -m compileall -q "$APP_DIR/applyforme" >/dev/null 2>&1; then
+  echo "! Python syntax check failed — fix the traceback before starting the worker."
+  echo "  Run: $APP_DIR/.venv/bin/python -m compileall -q $APP_DIR/applyforme"
+  missing=1
 fi
 if [[ "$WORKER_ONLY" != "1" && ! -f "$APP_DIR/dashboard/.next/BUILD_ID" ]]; then
   echo "! Missing $APP_DIR/dashboard/.next/BUILD_ID — the dashboard was not built."

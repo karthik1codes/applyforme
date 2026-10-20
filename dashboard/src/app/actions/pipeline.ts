@@ -188,16 +188,25 @@ export async function jobTailorReady(jobId: string): Promise<{
   status: string;
   hasCover: boolean;
   hasResumePdf: boolean;
+  error?: string;
 }> {
   const job = getJob(jobId);
-  if (!job) return { ready: false, status: "missing", hasCover: false, hasResumePdf: false };
+  if (!job) {
+    return { ready: false, status: "missing", hasCover: false, hasResumePdf: false, error: "Job not found." };
+  }
   const hasCover = !!job.coverLetter?.trim();
   const hasResumePdf = !!job.resumePdf;
+  const pipeline = getPipelineStatus("jobs");
+  const error =
+    !hasCover && pipeline.stage === "tailor" && pipeline.state === "error"
+      ? pipeline.message
+      : undefined;
   return {
     ready: hasCover && (job.status === "ready" || job.status === "manual"),
     status: job.status,
     hasCover,
     hasResumePdf,
+    error,
   };
 }
 

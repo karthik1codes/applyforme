@@ -167,7 +167,7 @@ def run_stage(
         "message": (
             ok_msg
             if result.get("ok")
-            else (result.get("error") or result.get("stderr_tail") or f"{stage} failed")[-240:]
+            else (result.get("error") or result.get("stderr_tail") or result.get("stdout_tail") or f"{stage} failed")[-400:]
         ),
     })
 

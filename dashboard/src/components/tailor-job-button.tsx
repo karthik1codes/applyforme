@@ -21,6 +21,12 @@ export function TailorJobButton({ jobId }: { jobId: string }) {
       try {
         const r = await jobTailorReady(jobId);
         if (!alive) return;
+        if (r.error) {
+          setRunning(false);
+          setMsg(`Tailor failed — ${r.error}`);
+          router.refresh();
+          return;
+        }
         if (r.ready) {
           setRunning(false);
           setMsg("Tailor done — Prepare application is unlocked. Resume is below.");
@@ -28,9 +34,9 @@ export function TailorJobButton({ jobId }: { jobId: string }) {
           return;
         }
         const elapsed = (Date.now() - startedAt.current) / 1000;
-        if (elapsed > 180) {
+        if (elapsed > 120) {
           setRunning(false);
-          setMsg("Timed out — check the banner / logs, then try Tailor again.");
+          setMsg("Still running after 2 minutes — check the pipeline banner / logs, then try again.");
           router.refresh();
           return;
         }
@@ -39,7 +45,7 @@ export function TailorJobButton({ jobId }: { jobId: string }) {
             ? "Almost done — saving resume…"
             : `Tailoring… ${Math.round(elapsed)}s (cover letter + resume PDF)`,
         );
-        window.setTimeout(tick, 2500);
+        window.setTimeout(tick, 1500);
       } catch {
         if (alive) window.setTimeout(tick, 4000);
       }
