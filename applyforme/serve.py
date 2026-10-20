@@ -255,7 +255,7 @@ class Handler(BaseHTTPRequestHandler):
 
         extra: list[str] = []
         job_id = (body.get("job_id") or (qs.get("job_id") or [None])[0] or "").strip()
-        if stage == "apply" and job_id:
+        if stage in ("apply", "tailor") and job_id:
             extra.append(job_id)
         submit = stage == "apply" and str(body.get("submit") or "").lower() in ("1", "true", "yes", "on")
 

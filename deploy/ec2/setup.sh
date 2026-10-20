@@ -160,8 +160,17 @@ if [[ "$is_amazon" -eq 1 ]]; then
            libXcomposite libXdamage libXrandr mesa-libgbm pango alsa-lib \
            libXScrnSaver libXcursor libXext libXi libXfixes libXrender \
            libXtst libxkbcommon cairo dbus-libs glib2 fontconfig liberation-fonts; do
-    pkg_install "$p" >/dev/null 2>&1 || true
+    pkg_install "$p" >/dev/null 2>&1 || echo "  ! could not install Playwright dependency: $p"
   done
+fi
+
+# Catch missing Chromium shared libraries now, not when the user clicks Tailor.
+if ! sudo -u "$USER_NAME" env PLAYWRIGHT_BROWSERS_PATH="$APP_DIR/.cache/ms-playwright" \
+  "$APP_DIR/.venv/bin/python" -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop()' >/dev/null 2>&1; then
+  echo "! Chromium cannot launch on this host." >&2
+  echo "  Install the Playwright runtime libraries, then re-run setup:" >&2
+  echo "  sudo dnf install -y atk at-spi2-atk at-spi2-core cups-libs libdrm libXcomposite libXdamage libXrandr mesa-libgbm pango alsa-lib libXScrnSaver libXcursor libXext libXi libXfixes libXrender libXtst libxkbcommon cairo fontconfig liberation-fonts" >&2
+  exit 1
 fi
 
 if [[ ! -f "$APP_DIR/.env" ]]; then
