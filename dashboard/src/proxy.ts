@@ -4,6 +4,7 @@ import { auth, authDisabled } from "@/auth";
 const PROTECTED = [
   "/home",
   "/jobs",
+  "/internships",
   "/applications",
   "/feedback",
   "/inbox",
@@ -18,24 +19,36 @@ const PROTECTED = [
   "/whatsapp",
   "/billing",
   "/onboarding",
+  "/referral",
 ];
 
 export default auth((req) => {
-  if (authDisabled()) return NextResponse.next();
   const path = req.nextUrl.pathname;
+  const requestHeaders = new Headers(req.headers);
+  requestHeaders.set("x-pathname", path);
+
+  if (authDisabled()) {
+    return NextResponse.next({ request: { headers: requestHeaders } });
+  }
+
   const needsAuth = PROTECTED.some((p) => path === p || path.startsWith(p + "/"));
   if (needsAuth && !req.auth) {
     const url = new URL("/", req.nextUrl.origin);
-    url.searchParams.set("next", path);
+    // After Google sign-in, always resume onboarding (not a random deep link).
+    const next = path === "/onboarding" || path.startsWith("/onboarding")
+      ? `${path}${req.nextUrl.search}`
+      : "/onboarding";
+    url.searchParams.set("next", next);
     return NextResponse.redirect(url);
   }
-  return NextResponse.next();
+  return NextResponse.next({ request: { headers: requestHeaders } });
 });
 
 export const config = {
   matcher: [
     "/home/:path*",
     "/jobs/:path*",
+    "/internships/:path*",
     "/applications/:path*",
     "/feedback/:path*",
     "/inbox/:path*",
@@ -50,5 +63,6 @@ export const config = {
     "/whatsapp/:path*",
     "/billing/:path*",
     "/onboarding/:path*",
+    "/referral/:path*",
   ],
 };

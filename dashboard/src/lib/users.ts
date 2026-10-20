@@ -12,13 +12,19 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT,
   image TEXT,
   resume_path TEXT,
+  onboarding_complete INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 `;
 
 export function ensureUsersTable() {
-  db().exec(USERS_SCHEMA);
+  const d = db();
+  d.exec(USERS_SCHEMA);
+  const cols = (d.pragma("table_info(users)") as { name: string }[]).map((c) => c.name);
+  if (!cols.includes("onboarding_complete")) {
+    d.exec("ALTER TABLE users ADD COLUMN onboarding_complete INTEGER NOT NULL DEFAULT 0");
+  }
 }
 
 export type UserRow = {
@@ -27,6 +33,7 @@ export type UserRow = {
   name: string | null;
   image: string | null;
   resume_path: string | null;
+  onboarding_complete: number;
   created_at: string;
   updated_at: string;
 };
@@ -36,8 +43,8 @@ export function upsertUser(u: { id: string; email: string; name?: string | null;
   const now = new Date().toISOString();
   db()
     .prepare(
-      `INSERT INTO users (id, email, name, image, created_at, updated_at)
-       VALUES (@id, @email, @name, @image, @now, @now)
+      `INSERT INTO users (id, email, name, image, onboarding_complete, created_at, updated_at)
+       VALUES (@id, @email, @name, @image, 0, @now, @now)
        ON CONFLICT(id) DO UPDATE SET
          email=excluded.email, name=excluded.name, image=excluded.image, updated_at=excluded.updated_at`,
     )
@@ -47,6 +54,25 @@ export function upsertUser(u: { id: string; email: string; name?: string | null;
 export function getUser(id: string): UserRow | null {
   ensureUsersTable();
   return (db().prepare("SELECT * FROM users WHERE id=?").get(id) as UserRow | undefined) ?? null;
+}
+
+export function getUserByEmail(email: string): UserRow | null {
+  ensureUsersTable();
+  return (db().prepare("SELECT * FROM users WHERE lower(email)=lower(?)").get(email) as UserRow | undefined) ?? null;
+}
+
+/** Per-Gmail onboarding flag — each Google account must finish the wizard once. */
+export function userOnboardingDone(userId: string | null | undefined): boolean {
+  if (!userId) return false;
+  const u = getUser(userId);
+  return !!(u && Number(u.onboarding_complete) === 1);
+}
+
+export function markUserOnboardingComplete(userId: string, complete = true) {
+  ensureUsersTable();
+  db()
+    .prepare("UPDATE users SET onboarding_complete=?, updated_at=? WHERE id=?")
+    .run(complete ? 1 : 0, new Date().toISOString(), userId);
 }
 
 export function setUserResume(userId: string, resumePath: string) {
@@ -67,11 +93,9 @@ export function saveResume(userId: string, fileName: string, bytes: Buffer): { p
   const dest = path.join(dir, `resume${ext}`);
   fs.writeFileSync(dest, bytes);
 
-  // Agents read ./resume.pdf from the repo root — keep a copy there for the local pipeline.
   const agentCopy = path.join(ROOT, ext === ".pdf" ? "resume.pdf" : `resume${ext}`);
   fs.copyFileSync(dest, agentCopy);
 
-  // Point profile.yaml at the agent copy when present.
   const profilePath = path.join(ROOT, "profile.yaml");
   if (fs.existsSync(profilePath)) {
     let yaml = fs.readFileSync(profilePath, "utf8");

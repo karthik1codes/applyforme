@@ -1,6 +1,8 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { auth, authDisabled } from "@/auth";
 import { LandingHero } from "@/components/landing/hero";
+import { isOnboardingCompleteForSession, sessionUserId } from "@/lib/onboarding-gate";
 import { upsertUser, userHasResume } from "@/lib/users";
 
 export const dynamic = "force-dynamic";
@@ -8,11 +10,11 @@ export const dynamic = "force-dynamic";
 export default async function LandingPage({
   searchParams,
 }: {
-  searchParams: Promise<{ next?: string }>;
+  searchParams: Promise<{ next?: string; ref?: string; signedout?: string }>;
 }) {
-  const { next } = await searchParams;
+  const { next, ref, signedout } = await searchParams;
   const session = await auth();
-  const userId = (session?.user as { id?: string } | undefined)?.id || session?.user?.email || null;
+  const userId = session?.user ? sessionUserId(session) : null;
   if (session?.user?.email && userId) {
     upsertUser({
       id: userId,
@@ -27,14 +29,26 @@ export default async function LandingPage({
       ? userHasResume("local")
       : false;
 
+  // Per-Gmail: this account must finish onboarding (not another user's yaml).
+  const done = await isOnboardingCompleteForSession();
+  const afterAuth = ref ? `/onboarding?ref=${encodeURIComponent(ref)}` : "/onboarding";
+  const startHref = next?.startsWith("/onboarding") ? next : afterAuth;
+
+  if (session?.user && !done && signedout !== "1") {
+    redirect(startHref);
+  }
+
   return (
     <>
       <LandingHero
         signedIn={!!session?.user}
         hasResume={hasResume}
+        onboardingDone={done}
         userName={session?.user?.name}
         authOff={authDisabled()}
-        next={next}
+        next={startHref}
+        referralCode={ref}
+        signedOut={signedout === "1" && !session?.user}
       />
 
       <section id="how" className="relative z-10 border-t border-white/10 bg-black px-6 py-20 md:px-10 md:py-28">
@@ -43,13 +57,13 @@ export default async function LandingPage({
             From job board to submitted — without the grind
           </h2>
           <p className="mt-4 max-w-2xl font-[family-name:var(--font-landing-body)] text-lg font-medium text-white/75 md:text-xl">
-            Sign in, drop your resume, and let the agents discover, score, tailor, and fill applications. You approve every submit.
+            Sign in, tell us a bit about you, drop your resume, and let the agents discover, score, tailor, and fill applications. You approve every submit.
           </p>
           <ol className="mt-14 grid gap-10 md:grid-cols-3 md:gap-8">
             {[
               { n: "01", t: "Sign in", d: "Continue with Google so your applications stay tied to you." },
-              { n: "02", t: "Upload resume", d: "PDF or text. Agents use only what you give them — no invented experience." },
-              { n: "03", t: "Let them apply", d: "Watch matches, tailored resumes, and forms that wait for your yes." },
+              { n: "02", t: "Quick onboarding", d: "Where you heard about us, your role, referral, then resume." },
+              { n: "03", t: "Dashboard", d: "Watch matches, tailored resumes, and forms that wait for your yes." },
             ].map((s) => (
               <li key={s.n}>
                 <span className="font-[family-name:var(--font-landing-body)] text-sm font-medium text-[#ff4c00]">{s.n}</span>
@@ -59,12 +73,21 @@ export default async function LandingPage({
             ))}
           </ol>
           <div className="mt-14">
-            <Link
-              href="#start"
-              className="inline-flex min-h-10 min-w-[160px] items-center justify-center rounded border border-transparent bg-white px-4 py-2 text-base font-normal text-black"
-            >
-              Start applying
-            </Link>
+            {session?.user ? (
+              <Link
+                href={done ? "/home" : startHref}
+                className="inline-flex min-h-10 min-w-[160px] items-center justify-center rounded border border-transparent bg-white px-4 py-2 text-base font-normal text-black"
+              >
+                {done ? "Open dashboard" : "Continue setup"}
+              </Link>
+            ) : (
+              <a
+                href="#start"
+                className="inline-flex min-h-10 min-w-[160px] items-center justify-center rounded border border-transparent bg-white px-4 py-2 text-base font-normal text-black"
+              >
+                Start applying
+              </a>
+            )}
           </div>
         </div>
       </section>

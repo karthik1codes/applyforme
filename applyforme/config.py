@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
 
 from .models import Profile
+
+# Windows defaults to cp1252 for pipes/consoles — job titles and rich traces blow up otherwise.
+os.environ.setdefault("PYTHONUTF8", "1")
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+    except Exception:
+        pass
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"

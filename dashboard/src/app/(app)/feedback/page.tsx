@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { feedbackQueue, type Question } from "@/lib/db";
+import { requireOnboarding } from "@/lib/onboarding-gate";
 
 const selectCls =
   "h-8 w-full rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30";
@@ -37,7 +38,8 @@ function Field({ q }: { q: Question }) {
   );
 }
 
-export default function Page() {
+export default async function Page() {
+  await requireOnboarding();
   const queue = feedbackQueue();
   return (
     <PageContainer
@@ -76,9 +78,9 @@ export default function Page() {
                 <Field key={q.id} q={q} />
               ))}
               <div className="flex flex-wrap items-center gap-3">
-                <Button type="submit">Save answers</Button>
+                <Button type="submit">Save & continue applying</Button>
                 <span className="text-xs text-muted-foreground">
-                  Then run <code className="rounded bg-muted px-1.5 py-0.5">python -m applyforme apply {job.id}</code> to fill and submit.
+                  We&apos;ll resume filling this application as soon as every question is answered.
                 </span>
               </div>
             </form>

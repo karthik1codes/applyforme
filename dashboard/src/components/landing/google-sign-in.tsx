@@ -1,27 +1,70 @@
 "use client";
 
-import { useFormStatus } from "react-dom";
-import { googleSignIn } from "@/app/actions/auth";
+import { useState } from "react";
+import { getCsrfToken, getProviders } from "next-auth/react";
 
-function Submit({ label }: { label: string }) {
-  const { pending } = useFormStatus();
+/**
+ * Full-page form POST to Auth.js (most reliable behind Cloudflare tunnels).
+ * Avoids fetch-based signIn returning to / without reaching Google.
+ */
+export function GoogleSignIn({
+  next = "/onboarding",
+  label = "Start applying",
+}: {
+  next?: string;
+  label?: string;
+}) {
+  const [pending, setPending] = useState(false);
+  const callbackUrl = next.startsWith("/") ? next : "/onboarding";
+
+  async function start() {
+    setPending(true);
+    try {
+      const [csrf, providers] = await Promise.all([getCsrfToken(), getProviders()]);
+      if (!providers?.google) {
+        window.location.assign("/auth/error?error=Configuration");
+        return;
+      }
+      if (!csrf) {
+        window.location.assign("/auth/error?error=Configuration");
+        return;
+      }
+
+      const form = document.createElement("form");
+      form.method = "POST";
+      form.action = "/api/auth/signin/google";
+      form.style.display = "none";
+
+      const csrfInput = document.createElement("input");
+      csrfInput.type = "hidden";
+      csrfInput.name = "csrfToken";
+      csrfInput.value = csrf;
+      form.appendChild(csrfInput);
+
+      const cbInput = document.createElement("input");
+      cbInput.type = "hidden";
+      cbInput.name = "callbackUrl";
+      cbInput.value = callbackUrl;
+      form.appendChild(cbInput);
+
+      document.body.appendChild(form);
+      form.submit();
+    } catch {
+      setPending(false);
+      window.location.assign("/auth/error?error=Configuration");
+    }
+  }
+
   return (
     <button
-      type="submit"
+      type="button"
       disabled={pending}
+      onClick={() => void start()}
       className="inline-flex min-h-10 min-w-[160px] items-center justify-center gap-2 rounded border border-transparent bg-white px-4 py-2 text-base font-normal text-black transition hover:bg-white/90 disabled:opacity-60"
     >
       <GoogleIcon />
       {pending ? "Redirecting…" : label}
     </button>
-  );
-}
-
-export function GoogleSignIn({ next = "/onboarding" }: { next?: string }) {
-  return (
-    <form action={async () => { await googleSignIn(next); }}>
-      <Submit label="Continue with Google" />
-    </form>
   );
 }
 

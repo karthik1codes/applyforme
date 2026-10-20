@@ -1,17 +1,21 @@
 [Unit]
-Description=applyforme pipeline worker (cron + webhooks)
-After=network.target
+Description=applyforme EC2 pipeline worker (jobs + internships lanes, cron + webhooks)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
+User=ec2-user
 WorkingDirectory=/opt/applyforme
 EnvironmentFile=/opt/applyforme/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONUTF8=1
+Environment=PYTHONIOENCODING=utf-8
+# Bind to localhost only — nginx / Next proxy public traffic. Never open 8787 in the SG.
 ExecStart=/opt/applyforme/.venv/bin/python -m applyforme serve --host 127.0.0.1 --port 8787
 Restart=always
 RestartSec=5
-# Playwright / Chromium often need these on headless servers
-Environment=PYTHONUNBUFFERED=1
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/applyforme/.cache/ms-playwright
 
 [Install]
 WantedBy=multi-user.target

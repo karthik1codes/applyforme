@@ -1,75 +1,209 @@
 #!/usr/bin/env bash
-# Bootstrap applyforme on a fresh Ubuntu EC2 (Amazon Linux: adapt package names).
-# Usage (as ubuntu, from the repo root you cloned to /opt/applyforme):
+# Bootstrap / update applyforme on Amazon Linux (ec2-user) or Ubuntu.
 #   sudo bash deploy/ec2/setup.sh
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/applyforme}"
-USER_NAME="${SUDO_USER:-ubuntu}"
+
+# Prefer ec2-user (Amazon Linux); fall back to ubuntu / SUDO_USER
+if [[ -n "${APPLYFORME_USER:-}" ]]; then
+  USER_NAME="$APPLYFORME_USER"
+elif id -u ec2-user >/dev/null 2>&1; then
+  USER_NAME=ec2-user
+elif id -u ubuntu >/dev/null 2>&1; then
+  USER_NAME=ubuntu
+else
+  USER_NAME="${SUDO_USER:-root}"
+fi
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "Run with sudo"; exit 1
 fi
 
-apt-get update -y
-apt-get install -y python3 python3-venv python3-pip git nginx curl
-
-# Node 20
-if ! command -v node >/dev/null; then
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-  apt-get install -y nodejs
+if [[ ! -d "$APP_DIR" ]]; then
+  echo "Missing $APP_DIR — clone the repo there first (see deploy/ec2/PUSH.md)"; exit 1
 fi
 
-# Playwright OS deps (Chromium)
+is_amazon=0
+if [[ -f /etc/os-release ]] && grep -qiE 'amazon|amzn' /etc/os-release; then
+  is_amazon=1
+fi
+
+pkg_install() {
+  if [[ "$is_amazon" -eq 1 ]]; then
+    if command -v dnf >/dev/null; then
+      dnf install -y "$@"
+    else
+      yum install -y "$@"
+    fi
+  else
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y "$@"
+  fi
+}
+
+echo "=== applyforme setup (user=$USER_NAME, amazon=$is_amazon) ==="
+
+if [[ "$is_amazon" -eq 1 ]]; then
+  # Amazon Linux 2 / 2023
+  pkg_install git curl openssl nginx python3 python3-pip
+  # venv module
+  pkg_install python3-devel gcc || true
+else
+  pkg_install git curl openssl nginx python3 python3-venv python3-pip
+fi
+
+# The app needs Python >= 3.10. AL2023's default python3 is 3.9, so prefer a
+# versioned interpreter and install 3.11 when none is new enough.
+python_ok() {
+  "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)' >/dev/null 2>&1
+}
+PYTHON3=""
+for cand in python3.13 python3.12 python3.11 python3.10 python3; do
+  if command -v "$cand" >/dev/null && python_ok "$(command -v "$cand")"; then
+    PYTHON3="$(command -v "$cand")"
+    break
+  fi
+done
+if [[ -z "$PYTHON3" ]]; then
+  echo "No Python >= 3.10 found; installing python3.11"
+  if [[ "$is_amazon" -eq 1 ]]; then
+    pkg_install python3.11 python3.11-pip || pkg_install python3.11
+  else
+    pkg_install python3.11 python3.11-venv python3.11-dev
+  fi
+  PYTHON3="$(command -v python3.11)"
+fi
+"$PYTHON3" -m ensurepip --upgrade >/dev/null 2>&1 || true
+echo "Using $PYTHON3 ($("$PYTHON3" -V 2>&1))"
+
+# Node 20
+if ! command -v node >/dev/null || [[ "$(node -v 2>/dev/null | cut -d. -f1 | tr -d v || echo 0)" -lt 20 ]]; then
+  if [[ "$is_amazon" -eq 1 ]]; then
+    curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+    pkg_install nodejs
+  else
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    pkg_install nodejs
+  fi
+fi
+
+# npm path for systemd (Amazon Linux often /usr/bin/npm)
+NPM_BIN="$(command -v npm)"
+
 cd "$APP_DIR"
-sudo -u "$USER_NAME" python3 -m venv .venv
+chown -R "$USER_NAME:$USER_NAME" "$APP_DIR"
+
+if [[ -x .venv/bin/python ]] && ! .venv/bin/python -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)' >/dev/null 2>&1; then
+  echo "Existing .venv uses an old Python — recreating it"
+  rm -rf .venv
+fi
+if ! sudo -u "$USER_NAME" "$PYTHON3" -m venv .venv; then
+  echo "venv creation failed — installing pip/venv support for $PYTHON3"
+  if [[ "$is_amazon" -eq 1 ]]; then
+    pkg_install python3.11-pip || true
+  else
+    pkg_install python3.11-venv || true
+  fi
+  sudo -u "$USER_NAME" "$PYTHON3" -m venv .venv
+fi
 sudo -u "$USER_NAME" .venv/bin/pip install -U pip
 sudo -u "$USER_NAME" .venv/bin/pip install -r requirements.txt
 sudo -u "$USER_NAME" .venv/bin/playwright install-deps chromium || true
-sudo -u "$USER_NAME" .venv/bin/playwright install chromium
+sudo -u "$USER_NAME" mkdir -p .cache/ms-playwright
+sudo -u "$USER_NAME" env PLAYWRIGHT_BROWSERS_PATH="$APP_DIR/.cache/ms-playwright" \
+  .venv/bin/playwright install chromium
 
 if [[ ! -f "$APP_DIR/.env" ]]; then
   cp "$APP_DIR/.env.example" "$APP_DIR/.env"
-  # Generate secrets
-  SECRET=$(openssl rand -hex 32)
-  AUTH=$(openssl rand -hex 32)
-  sed -i "s/^# PIPELINE_WEBHOOK_SECRET=.*/PIPELINE_WEBHOOK_SECRET=$SECRET/" "$APP_DIR/.env" || true
-  grep -q '^PIPELINE_WEBHOOK_SECRET=' "$APP_DIR/.env" || echo "PIPELINE_WEBHOOK_SECRET=$SECRET" >> "$APP_DIR/.env"
-  grep -q '^AUTH_SECRET=' "$APP_DIR/.env" || echo "AUTH_SECRET=$AUTH" >> "$APP_DIR/.env"
-  grep -q '^SCHEDULE_RUN=' "$APP_DIR/.env" || echo "SCHEDULE_RUN=0 */4 * * *" >> "$APP_DIR/.env"
-  grep -q '^SCHEDULE_INBOX=' "$APP_DIR/.env" || echo "SCHEDULE_INBOX=30 */6 * * *" >> "$APP_DIR/.env"
-  grep -q '^PIPELINE_WORKER_URL=' "$APP_DIR/.env" || echo "PIPELINE_WORKER_URL=http://127.0.0.1:8787" >> "$APP_DIR/.env"
-  echo "Wrote $APP_DIR/.env — edit OPENAI_API_KEY, APP_URL, Google OAuth, then restart services."
+  chown "$USER_NAME:$USER_NAME" "$APP_DIR/.env"
 fi
 
+SECRET=$(openssl rand -hex 32)
+AUTH=$(openssl rand -hex 32)
+ensure_env() {
+  local key="$1" val="$2"
+  if grep -qE "^#?${key}=" "$APP_DIR/.env" 2>/dev/null; then
+    sed -i "s|^#\\?${key}=.*|${key}=${val}|" "$APP_DIR/.env"
+  else
+    echo "${key}=${val}" >> "$APP_DIR/.env"
+  fi
+}
+grep -q '^PIPELINE_WEBHOOK_SECRET=.\+' "$APP_DIR/.env" 2>/dev/null || ensure_env PIPELINE_WEBHOOK_SECRET "$SECRET"
+grep -q '^AUTH_SECRET=.\+' "$APP_DIR/.env" 2>/dev/null || ensure_env AUTH_SECRET "$AUTH"
+ensure_env PIPELINE_WORKER_URL "http://127.0.0.1:8787"
+ensure_env PIPELINE_HOST "127.0.0.1"
+ensure_env PIPELINE_PORT "8787"
+grep -q '^SCHEDULE_RUN=' "$APP_DIR/.env" || ensure_env SCHEDULE_RUN "0 */4 * * *"
+grep -q '^SCHEDULE_INBOX=' "$APP_DIR/.env" || ensure_env SCHEDULE_INBOX "30 */6 * * *"
+grep -q '^SCHEDULE_INTERNSHIPS=' "$APP_DIR/.env" || ensure_env SCHEDULE_INTERNSHIPS "15 */6 * * *"
+grep -q '^JOB_RETENTION_DAYS=' "$APP_DIR/.env" || ensure_env JOB_RETENTION_DAYS "10"
+grep -q '^PYTHONUTF8=' "$APP_DIR/.env" || ensure_env PYTHONUTF8 "1"
+sed -i 's/^AUTH_DISABLED=1/# AUTH_DISABLED=1/' "$APP_DIR/.env" || true
+
 cd "$APP_DIR/dashboard"
-sudo -u "$USER_NAME" npm ci || sudo -u "$USER_NAME" npm install
-sudo -u "$USER_NAME" npm run build
+sudo -u "$USER_NAME" "$NPM_BIN" ci || sudo -u "$USER_NAME" "$NPM_BIN" install
+sudo -u "$USER_NAME" "$NPM_BIN" run build
 
 install -m 644 "$APP_DIR/deploy/ec2/applyforme-worker.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/ec2/applyforme-web.service" /etc/systemd/system/
-# Fix User= in units if needed
 sed -i "s/^User=.*/User=$USER_NAME/" /etc/systemd/system/applyforme-worker.service
 sed -i "s/^User=.*/User=$USER_NAME/" /etc/systemd/system/applyforme-web.service
 sed -i "s|/opt/applyforme|$APP_DIR|g" /etc/systemd/system/applyforme-worker.service
 sed -i "s|/opt/applyforme|$APP_DIR|g" /etc/systemd/system/applyforme-web.service
+# Point ExecStart at the real npm binary (Amazon Linux)
+sed -i "s|/usr/bin/npm|$NPM_BIN|g" /etc/systemd/system/applyforme-web.service
 
 systemctl daemon-reload
 systemctl enable --now applyforme-worker applyforme-web
+systemctl restart applyforme-worker applyforme-web
 
+# nginx — Amazon Linux uses conf.d; Ubuntu uses sites-available
 if [[ -f "$APP_DIR/deploy/ec2/nginx.conf" ]]; then
-  cp "$APP_DIR/deploy/ec2/nginx.conf" /etc/nginx/sites-available/applyforme
-  ln -sf /etc/nginx/sites-available/applyforme /etc/nginx/sites-enabled/applyforme
-  rm -f /etc/nginx/sites-enabled/default
-  nginx -t && systemctl reload nginx
+  PUB_IP=$(curl -fsS --max-time 2 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
+  TMP=$(mktemp)
+  if [[ -n "$PUB_IP" ]]; then
+    sed "s/apply.example.com/_/" "$APP_DIR/deploy/ec2/nginx.conf" > "$TMP"
+  else
+    cp "$APP_DIR/deploy/ec2/nginx.conf" "$TMP"
+  fi
+  if [[ -d /etc/nginx/sites-available ]]; then
+    cp "$TMP" /etc/nginx/sites-available/applyforme
+    ln -sf /etc/nginx/sites-available/applyforme /etc/nginx/sites-enabled/applyforme
+    rm -f /etc/nginx/sites-enabled/default
+  else
+    # Amazon Linux / RHEL style
+    mkdir -p /etc/nginx/conf.d
+    # Drop default server if present so our config wins
+    [[ -f /etc/nginx/conf.d/default.conf ]] && mv /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.bak || true
+    cp "$TMP" /etc/nginx/conf.d/applyforme.conf
+  fi
+  rm -f "$TMP"
+  nginx -t && systemctl enable --now nginx && systemctl reload nginx
+fi
+
+# Firewall: prefer firewalld on Amazon Linux; ufw on Ubuntu. Security group is primary.
+if command -v firewall-cmd >/dev/null; then
+  firewall-cmd --permanent --add-service=ssh || true
+  firewall-cmd --permanent --add-service=http || true
+  firewall-cmd --permanent --add-service=https || true
+  firewall-cmd --reload || true
+elif command -v ufw >/dev/null; then
+  ufw allow OpenSSH || true
+  ufw allow 80/tcp || true
+  ufw allow 443/tcp || true
+  ufw --force enable || true
 fi
 
 echo ""
-echo "=== applyforme EC2 ready ==="
-echo "Worker:  systemctl status applyforme-worker"
-echo "Web:     systemctl status applyforme-web"
-echo "Health:  curl -s http://127.0.0.1:8787/health"
-echo "Trigger: curl -X POST http://127.0.0.1:8787/hooks/run \\"
-echo "           -H \"Authorization: Bearer \$PIPELINE_WEBHOOK_SECRET\" -H 'Content-Type: application/json' -d '{}'"
-echo "Public:  POST https://YOUR_DOMAIN/api/pipeline/webhook  {\"stage\":\"run\"}"
-echo "Open security group: 80/443 only. Do NOT expose port 8787 publicly."
+echo "=== applyforme running on this EC2 instance ==="
+echo "OS user:  $USER_NAME"
+echo "Worker:   systemctl status applyforme-worker"
+echo "Web:      systemctl status applyforme-web"
+echo "Health:   curl -s http://127.0.0.1:8787/health"
+echo ""
+echo "Edit secrets:  sudo nano $APP_DIR/.env"
+echo "Then:          sudo systemctl restart applyforme-worker applyforme-web"
+echo "SSH as:        ssh -i KEY.pem ec2-user@PUBLIC_IP"
+echo "Security group: 22 / 80 / 443 — do NOT open 8787."

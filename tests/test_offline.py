@@ -47,9 +47,9 @@ def test_render_pdf_and_tex(tmp_path, monkeypatch):
     src = Path(tex_path).read_text(encoding="utf-8")
     assert src.startswith("%") and r"\begin{document}" in src and r"\end{document}" in src
     assert "Acme Corp" in src and "Jane" in src
-    # Elegant Resume (Giannetti) markers
-    assert r"navyblue" in src and r"\begin{rSection}" in src and r"\begin{rSubsection}" in src
-    assert r"Technical skills" in src and r"Work experience" in src
+    # Elegant Resume (Jake-style) markers
+    assert r"\usepackage{enumitem}" in src and r"\resumeItemListStart" in src and r"\href{" in src
+    assert r"\resumeSection{Skills}" in src and r"\resumeSection{Experience}" in src
 
 
 def test_latex_escaping():

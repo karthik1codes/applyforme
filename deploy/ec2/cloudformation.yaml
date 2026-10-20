@@ -1,0 +1,107 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: applyforme — EC2 host for Next.js dashboard + Python pipeline worker (jobs ∥ internships)
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Existing EC2 key pair for SSH
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.small, t3.medium, t3.large, t3.xlarge]
+  RepoUrl:
+    Type: String
+    Default: https://github.com/YOUR_USER/applyforme.git
+  RepoBranch:
+    Type: String
+    Default: main
+  AllowedSshCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: Restrict SSH (recommended - your /32)
+
+Mappings:
+  RegionAMI:
+    # Ubuntu 22.04 LTS amd64 — override via SSM prefer in production; these are placeholders refreshed by launch-ec2.sh
+    us-east-1:
+      AMI: ami-0c7217cdde317cfec
+    ap-south-1:
+      AMI: ami-0f58b397bc5c1f2e8
+
+Conditions:
+  HasMapping: !Not [!Equals [!FindInMap [RegionAMI, !Ref AWS::Region, AMI], ""]]
+
+Resources:
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: applyforme — SSH + HTTP/S only (worker stays on localhost)
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSshCidr
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap [RegionAMI, !Ref AWS::Region, AMI]
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [!Ref SecurityGroup]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: applyforme
+        - Key: app
+          Value: applyforme
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          export APPLYFORME_REPO_URL="${RepoUrl}"
+          export APPLYFORME_REPO_BRANCH="${RepoBranch}"
+          curl -fsSL https://raw.githubusercontent.com/YOUR_USER/applyforme/${RepoBranch}/deploy/ec2/user-data.sh | bash || \
+          (apt-get update -y && apt-get install -y git && \
+           git clone --branch ${RepoBranch} ${RepoUrl} /opt/applyforme && \
+           bash /opt/applyforme/deploy/ec2/setup.sh)
+
+Outputs:
+  PublicIp:
+    Value: !GetAtt Instance.PublicIp
+  InstanceId:
+    Value: !Ref Instance
+  SshHint:
+    Value: !Sub "ssh -i KEY.pem ubuntu@${Instance.PublicIp}"
+  NextSteps:
+    Value: Edit /opt/applyforme/.env then systemctl restart applyforme-worker applyforme-web

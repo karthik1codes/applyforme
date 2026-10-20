@@ -1,4 +1,5 @@
-import Stripe from "stripe";
+import DodoPayments from "dodopayments";
+import { auth } from "@/auth";
 import { kvGet, kvSet } from "@/lib/db";
 
 /** Edit these freely: plan names, prices and feature copy are placeholders for your product. */
@@ -10,8 +11,11 @@ export const PLANS = [
 
 export type PlanId = (typeof PLANS)[number]["id"];
 export type BillingState = {
-  plan: PlanId; status: "none" | "active" | "past_due" | "canceled";
-  customerId?: string; subscriptionId?: string; currentPeriodEnd?: string;
+  plan: PlanId;
+  status: "none" | "active" | "past_due" | "canceled";
+  customerId?: string;
+  subscriptionId?: string;
+  currentPeriodEnd?: string;
 };
 
 export const currency = () => (process.env.BILLING_CURRENCY ?? "usd").toLowerCase();
@@ -19,66 +23,107 @@ export const appUrl = () => process.env.APP_URL ?? "http://localhost:3000";
 export const getBilling = (): BillingState => kvGet<BillingState>("billing", { plan: "free", status: "none" });
 export const setBilling = (b: BillingState) => kvSet("billing", b);
 
-export function stripe(): Stripe | null {
-  return process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
+export function dodoEnvironment(): "test_mode" | "live_mode" {
+  const raw = (process.env.DODO_PAYMENTS_ENVIRONMENT || "test_mode").trim().toLowerCase();
+  return raw === "live_mode" || raw === "live" ? "live_mode" : "test_mode";
+}
+
+export function dodoEnabled(): boolean {
+  return !!process.env.DODO_PAYMENTS_API_KEY?.trim();
+}
+
+export function dodo(): DodoPayments | null {
+  const key = process.env.DODO_PAYMENTS_API_KEY?.trim();
+  if (!key) return null;
+  return new DodoPayments({ bearerToken: key, environment: dodoEnvironment() });
+}
+
+/** Map plan id → Dodo product id (create products in the Dodo dashboard / API). */
+export function productIdForPlan(planId: PlanId): string | undefined {
+  if (planId === "pro") return process.env.DODO_PAYMENTS_PRODUCT_PRO?.trim() || undefined;
+  if (planId === "max") return process.env.DODO_PAYMENTS_PRODUCT_MAX?.trim() || undefined;
+  return undefined;
+}
+
+export function planFromProductId(productId: string | undefined | null): PlanId | undefined {
+  if (!productId) return undefined;
+  const pro = process.env.DODO_PAYMENTS_PRODUCT_PRO?.trim();
+  const max = process.env.DODO_PAYMENTS_PRODUCT_MAX?.trim();
+  if (pro && productId === pro) return "pro";
+  if (max && productId === max) return "max";
+  return undefined;
 }
 
 export async function createCheckout(planId: PlanId): Promise<string> {
-  const s = stripe();
+  const client = dodo();
   const plan = PLANS.find((p) => p.id === planId);
-  if (!s) throw new Error("STRIPE_SECRET_KEY is not set");
+  const productId = productIdForPlan(planId);
+  if (!client) throw new Error("DODO_PAYMENTS_API_KEY is not set");
   if (!plan || plan.price === 0) throw new Error("Pick a paid plan");
-  const b = getBilling();
-  const session = await s.checkout.sessions.create({
-    mode: "subscription",
-    ...(b.customerId ? { customer: b.customerId } : {}),
-    line_items: [{
-      quantity: 1,
-      price_data: {
-        currency: currency(), unit_amount: plan.price * 100, recurring: { interval: "month" },
-        product_data: { name: `applyforme ${plan.name}` },
-      },
-    }],
+  if (!productId) throw new Error(`Missing DODO_PAYMENTS_PRODUCT_${planId.toUpperCase()} product id`);
+
+  const session = await auth();
+  const email = session?.user?.email ?? undefined;
+  const name = session?.user?.name ?? undefined;
+  const billing = getBilling();
+
+  const checkout = await client.checkoutSessions.create({
+    product_cart: [{ product_id: productId, quantity: 1 }],
+    ...(billing.customerId
+      ? { customer: { customer_id: billing.customerId } }
+      : email
+        ? { customer: { email, ...(name ? { name } : {}) } }
+        : {}),
     metadata: { plan: plan.id },
-    subscription_data: { metadata: { plan: plan.id } },
-    success_url: `${appUrl()}/billing?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${appUrl()}/billing?checkout=cancelled`,
+    return_url: `${appUrl()}/billing?checkout=success`,
   });
-  if (!session.url) throw new Error("Stripe did not return a checkout URL");
-  return session.url;
+
+  if (!checkout.checkout_url) throw new Error("Dodo Payments did not return a checkout URL");
+  return checkout.checkout_url;
 }
 
-/** Idempotent: read a finished Checkout Session and record the subscription locally (works without webhooks). */
-export async function syncCheckoutSession(sessionId: string): Promise<void> {
-  const s = stripe();
-  if (!s) return;
-  const session = await s.checkout.sessions.retrieve(sessionId, { expand: ["subscription"] });
-  if (session.status !== "complete") return;
-  const sub = session.subscription as Stripe.Subscription | null;
-  setBilling({
-    plan: (session.metadata?.plan as PlanId) ?? "pro",
-    status: "active",
-    customerId: typeof session.customer === "string" ? session.customer : session.customer?.id,
-    subscriptionId: sub?.id,
-    currentPeriodEnd: periodEnd(sub),
-  });
+/** After hosted checkout redirect: `?subscription_id=…&status=active`. */
+export async function syncCheckoutReturn(subscriptionId: string): Promise<void> {
+  const client = dodo();
+  if (!client || !subscriptionId) return;
+  const sub = await client.subscriptions.retrieve(subscriptionId);
+  applyDodoSubscription(sub);
 }
 
-export function applySubscription(sub: Stripe.Subscription): void {
+type DodoSub = {
+  subscription_id: string;
+  product_id: string;
+  status: string;
+  customer?: { customer_id?: string };
+  metadata?: Record<string, unknown>;
+  next_billing_date?: string | Date | null;
+};
+
+export function applyDodoSubscription(sub: DodoSub): void {
   const prev = getBilling();
-  const status = sub.status === "active" || sub.status === "trialing" ? "active" : sub.status === "past_due" ? "past_due" : "canceled";
+  const fromMeta = typeof sub.metadata?.plan === "string" ? (sub.metadata.plan as PlanId) : undefined;
+  const fromProduct = planFromProductId(sub.product_id);
+  const plan = fromMeta && fromMeta !== "free" ? fromMeta : fromProduct ?? prev.plan;
+
+  let status: BillingState["status"];
+  if (sub.status === "active") status = "active";
+  else if (sub.status === "on_hold" || sub.status === "pending") status = "past_due";
+  else if (sub.status === "cancelled" || sub.status === "expired" || sub.status === "failed") status = "canceled";
+  else status = prev.status;
+
   setBilling({
     ...prev,
-    plan: status === "canceled" ? "free" : ((sub.metadata?.plan as PlanId) ?? prev.plan),
-    status,
-    customerId: typeof sub.customer === "string" ? sub.customer : sub.customer.id,
-    subscriptionId: sub.id,
-    currentPeriodEnd: periodEnd(sub),
+    plan: status === "canceled" ? "free" : plan,
+    status: status === "canceled" ? "canceled" : status,
+    customerId: sub.customer?.customer_id ?? prev.customerId,
+    subscriptionId: sub.subscription_id,
+    currentPeriodEnd: sub.next_billing_date
+      ? new Date(sub.next_billing_date).toISOString()
+      : prev.currentPeriodEnd,
   });
 }
 
-function periodEnd(sub: Stripe.Subscription | null): string | undefined {
-  // Newer Stripe API versions put the period on the subscription item.
-  const end = (sub as unknown as { current_period_end?: number })?.current_period_end ?? sub?.items?.data?.[0]?.current_period_end;
-  return end ? new Date(end * 1000).toISOString() : undefined;
+export function customerPortalUrl(customerId: string): string {
+  const base = appUrl().replace(/\/$/, "");
+  return `${base}/api/customer-portal?customer_id=${encodeURIComponent(customerId)}`;
 }

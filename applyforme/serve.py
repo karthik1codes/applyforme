@@ -9,7 +9,11 @@ Env:
   SCHEDULE_RUN              cron (default "0 */4 * * *" = every 4 hours); empty to disable
   SCHEDULE_INBOX            cron (default "30 */6 * * *"); empty to disable
   SCHEDULE_LIMIT            int, default 40
-  ALLOW_AUTO_APPLY=1        required before POST /hooks/apply will submit (--yes)
+  JOB_RETENTION_DAYS        drop untouched listings older than N days (default 10; 0 disables)
+  ALLOW_AUTO_APPLY=1        required before a bulk POST /hooks/apply will prepare jobs
+  POST /hooks/apply body {"job_id":..., "submit":true} submits ONE application
+  after the dashboard records explicit one-shot authorization.
+  POST /hooks/cleanup       maintenance: dedupe + drop stale / off-target listings
 """
 from __future__ import annotations
 
@@ -28,8 +32,10 @@ from urllib.parse import parse_qs, urlparse
 
 from .config import ROOT
 
-LOCK = threading.Lock()
-STATE: dict[str, Any] = {"last": None, "running": None, "history": []}
+# Per-lane locks so jobs ∥ internships (and apply/inbox) can run in parallel.
+LANES = ("jobs", "internships", "apply", "inbox")
+LOCKS: dict[str, threading.Lock] = {lane: threading.Lock() for lane in LANES}
+STATE: dict[str, Any] = {"last": None, "running": {}, "history": []}
 HISTORY_MAX = 30
 
 
@@ -41,40 +47,98 @@ def _python() -> str:
     return sys.executable
 
 
-def run_stage(stage: str, *, limit: int = 40, extra: list[str] | None = None) -> dict[str, Any]:
-    """Run one CLI stage as a subprocess. Serialized so two hooks can't overlap."""
-    if stage not in ("discover", "enrich", "match", "tailor", "run", "inbox", "apply"):
+def lane_for_stage(stage: str) -> str:
+    if stage == "internships":
+        return "internships"
+    if stage == "apply":
+        return "apply"
+    if stage == "inbox":
+        return "inbox"
+    # cleanup / discover / enrich / match / tailor / run all use the jobs lane
+    return "jobs"
+
+
+def _set_dashboard_status(lane: str, payload: dict[str, Any]) -> None:
+    """Mirror status into SQLite so the Next.js banner can poll without talking to the worker."""
+    try:
+        from .store import Store
+
+        payload = {**payload, "lane": lane}
+        Store().kv_set(f"pipeline_status:{lane}", json.dumps(payload))
+    except Exception:
+        pass
+
+
+def run_stage(
+    stage: str,
+    *,
+    limit: int = 40,
+    extra: list[str] | None = None,
+    submit: bool = False,
+) -> dict[str, Any]:
+    """Run one CLI stage. Serialized per lane — jobs and internships do not block each other."""
+    if stage not in ("discover", "internships", "enrich", "match", "tailor", "run", "inbox", "apply", "cleanup"):
         return {"ok": False, "error": f"unknown stage {stage}"}
-    if not LOCK.acquire(blocking=False):
-        return {"ok": False, "error": "another job is already running", "running": STATE.get("running")}
+    lane = lane_for_stage(stage)
+    lock = LOCKS[lane]
+    if not lock.acquire(blocking=False):
+        return {"ok": False, "error": f"{lane} pipeline already running", "running": STATE["running"].get(lane)}
 
     cmd = [_python(), "-m", "applyforme", stage]
-    if stage != "inbox":
-        cmd += ["--limit", str(limit)]
+    # Positional job id for apply / tailor (before flags)
+    job_args = [a for a in (extra or []) if not a.startswith("-")]
+    flag_args = [a for a in (extra or []) if a.startswith("-")]
+    if stage in ("apply", "tailor") and job_args:
+        cmd += job_args[:1]
     if stage == "inbox":
         cmd += ["--days", str(int(os.getenv("SCHEDULE_INBOX_DAYS", "14")))]
+    elif stage == "cleanup":
+        cmd += ["--days", str(int(os.getenv("JOB_RETENTION_DAYS", "10")))]
+    else:
+        cmd += ["--limit", str(limit)]
     if stage == "apply":
-        if os.getenv("ALLOW_AUTO_APPLY") != "1":
-            LOCK.release()
-            return {"ok": False, "error": "ALLOW_AUTO_APPLY=1 required for webhook apply (refuses blind submits)"}
-        cmd += ["--yes"]
-    if extra:
-        cmd += extra
+        # Prepare is the default: fill and stop for review.  A submit must be
+        # one explicitly authorized job; never turn a bulk queue into blind
+        # submissions.
+        if submit:
+            if not job_args:
+                lock.release()
+                return {"ok": False, "error": "submit requires one job_id (one explicit authorization per application)"}
+            cmd += ["--submit"]
+        elif not job_args and os.getenv("ALLOW_AUTO_APPLY") != "1":
+            lock.release()
+            return {"ok": False, "error": "ALLOW_AUTO_APPLY=1 required for bulk webhook apply (refuses blind submits)"}
+    if flag_args:
+        cmd += flag_args
 
     started = _now()
-    STATE["running"] = {"stage": stage, "started": started, "cmd": cmd}
+    STATE["running"][lane] = {"stage": stage, "lane": lane, "started": started, "cmd": cmd}
+    _set_dashboard_status(lane, {
+        "stage": stage,
+        "state": "running",
+        "startedAt": started,
+        "finishedAt": None,
+        "message": f"{lane} pipeline: running {stage}…",
+    })
     try:
+        env = os.environ.copy()
+        env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        env["APPLYFORME_PIPELINE_LANE"] = lane
         proc = subprocess.run(
             cmd,
             cwd=str(ROOT),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=int(os.getenv("PIPELINE_TIMEOUT_SEC", "3600")),
-            env=os.environ.copy(),
+            env=env,
         )
         result = {
             "ok": proc.returncode == 0,
             "stage": stage,
+            "lane": lane,
             "started": started,
             "finished": _now(),
             "exit_code": proc.returncode,
@@ -82,12 +146,30 @@ def run_stage(stage: str, *, limit: int = 40, extra: list[str] | None = None) ->
             "stderr_tail": (proc.stderr or "")[-2000:],
         }
     except subprocess.TimeoutExpired:
-        result = {"ok": False, "stage": stage, "started": started, "finished": _now(), "error": "timeout"}
+        result = {"ok": False, "stage": stage, "lane": lane, "started": started, "finished": _now(), "error": "timeout"}
     except Exception as e:
-        result = {"ok": False, "stage": stage, "started": started, "finished": _now(), "error": str(e)}
+        result = {"ok": False, "stage": stage, "lane": lane, "started": started, "finished": _now(), "error": str(e)}
     finally:
-        STATE["running"] = None
-        LOCK.release()
+        STATE["running"].pop(lane, None)
+        lock.release()
+
+    finished = result.get("finished") or _now()
+    ok_msg = {
+        "run": "Done — open Jobs to see matches.",
+        "internships": "Internship search done — open Internships.",
+        "cleanup": "Cleanup done — stale and duplicate listings removed.",
+    }.get(stage, f"{stage} finished.")
+    _set_dashboard_status(lane, {
+        "stage": stage,
+        "state": "ok" if result.get("ok") else "error",
+        "startedAt": started,
+        "finishedAt": finished,
+        "message": (
+            ok_msg
+            if result.get("ok")
+            else (result.get("error") or result.get("stderr_tail") or f"{stage} failed")[-240:]
+        ),
+    })
 
     STATE["last"] = result
     STATE["history"] = ([result] + STATE["history"])[:HISTORY_MAX]
@@ -135,7 +217,9 @@ class Handler(BaseHTTPRequestHandler):
                 "last_ok": (STATE.get("last") or {}).get("ok"),
                 "schedules": {
                     "run": os.getenv("SCHEDULE_RUN", "0 */4 * * *"),
+                    "internships": os.getenv("SCHEDULE_INTERNSHIPS", "15 */6 * * *"),
                     "inbox": os.getenv("SCHEDULE_INBOX", "30 */6 * * *"),
+                    "retention_days": os.getenv("JOB_RETENTION_DAYS", "10"),
                 },
             })
         if path == "/status":
@@ -164,19 +248,37 @@ class Handler(BaseHTTPRequestHandler):
         # Aliases
         if stage in ("pipeline", "full"):
             stage = "run"
-        if stage not in ("discover", "enrich", "match", "tailor", "run", "inbox", "apply"):
+        if stage not in ("discover", "internships", "enrich", "match", "tailor", "run", "inbox", "apply", "cleanup"):
             return self._json(400, {"error": f"unknown hook '{stage}'", "allowed": [
-                "run", "discover", "enrich", "match", "tailor", "inbox", "apply",
+                "run", "discover", "internships", "enrich", "match", "tailor", "inbox", "apply", "cleanup",
             ]})
 
+        extra: list[str] = []
+        job_id = (body.get("job_id") or (qs.get("job_id") or [None])[0] or "").strip()
+        if stage == "apply" and job_id:
+            extra.append(job_id)
+        submit = stage == "apply" and str(body.get("submit") or "").lower() in ("1", "true", "yes", "on")
+
         # Run in a background thread so the webhook returns quickly (EventBridge / cron won't time out).
+        # Busy only if THIS lane is already running — jobs ∥ internships OK.
         async_mode = body.get("async", True)
+        lane = lane_for_stage(stage)
         if async_mode:
-            if STATE.get("running"):
-                return self._json(409, {"error": "busy", "running": STATE["running"]})
-            threading.Thread(target=run_stage, kwargs={"stage": stage, "limit": limit}, daemon=True).start()
-            return self._json(202, {"accepted": True, "stage": stage, "limit": limit, "started": _now()})
-        return self._json(200 if (r := run_stage(stage, limit=limit)).get("ok") else 500, r)
+            if STATE["running"].get(lane):
+                return self._json(409, {"error": "busy", "lane": lane, "running": STATE["running"].get(lane)})
+            threading.Thread(
+                target=run_stage,
+                kwargs={"stage": stage, "limit": limit, "extra": extra or None, "submit": submit},
+                daemon=True,
+            ).start()
+            return self._json(202, {
+                "accepted": True, "stage": stage, "lane": lane, "limit": limit,
+                "job_id": job_id or None, "started": _now(),
+            })
+        return self._json(
+            200 if (r := run_stage(stage, limit=limit, extra=extra or None, submit=submit)).get("ok") else 500,
+            r,
+        )
 
 
 def _parse_cron(expr: str):
@@ -221,12 +323,17 @@ def _should_fire(cron_parts: list[str], when: datetime) -> bool:
 
 
 def start_scheduler(stop: threading.Event) -> None:
-    """Simple minute-resolution cron loop (no extra dependency)."""
+    """Simple minute-resolution cron loop (no extra dependency). Jobs ∥ internships on separate lanes."""
     last_slot: str | None = None
     run_cron = _parse_cron(os.getenv("SCHEDULE_RUN", "0 */4 * * *"))
     inbox_cron = _parse_cron(os.getenv("SCHEDULE_INBOX", "30 */6 * * *"))
+    intern_cron = _parse_cron(os.getenv("SCHEDULE_INTERNSHIPS", "15 */6 * * *"))
     limit = int(os.getenv("SCHEDULE_LIMIT", "40"))
-    print(f"[scheduler] run={os.getenv('SCHEDULE_RUN', '0 */4 * * *')!r} inbox={os.getenv('SCHEDULE_INBOX', '30 */6 * * *')!r}")
+    print(
+        f"[scheduler] run={os.getenv('SCHEDULE_RUN', '0 */4 * * *')!r} "
+        f"internships={os.getenv('SCHEDULE_INTERNSHIPS', '15 */6 * * *')!r} "
+        f"inbox={os.getenv('SCHEDULE_INBOX', '30 */6 * * *')!r}"
+    )
 
     while not stop.wait(15):
         now = datetime.now()
@@ -235,11 +342,23 @@ def start_scheduler(stop: threading.Event) -> None:
             continue
         last_slot = slot
         try:
-            if run_cron and _should_fire(run_cron, now):
-                print(f"[scheduler] firing run @ {slot}")
+            # Honor profile search_focus so cron doesn't pull the wrong lane
+            try:
+                from .config import load_profile
+
+                pref = load_profile().preferences
+                want_jobs, want_interns = pref.wants_jobs(), pref.wants_internships()
+            except Exception:
+                want_jobs, want_interns = True, True
+
+            if want_jobs and run_cron and _should_fire(run_cron, now):
+                print(f"[scheduler] firing jobs lane (run) @ {slot}")
                 threading.Thread(target=run_stage, kwargs={"stage": "run", "limit": limit}, daemon=True).start()
+            if want_interns and intern_cron and _should_fire(intern_cron, now):
+                print(f"[scheduler] firing internships lane @ {slot}")
+                threading.Thread(target=run_stage, kwargs={"stage": "internships", "limit": limit}, daemon=True).start()
             if inbox_cron and _should_fire(inbox_cron, now):
-                print(f"[scheduler] firing inbox @ {slot}")
+                print(f"[scheduler] firing inbox lane @ {slot}")
                 threading.Thread(target=run_stage, kwargs={"stage": "inbox", "limit": limit}, daemon=True).start()
         except Exception:
             traceback.print_exc()

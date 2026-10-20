@@ -2,8 +2,8 @@ import { PageContainer } from "@/components/page-container";
 import { requireOnboarding } from "@/lib/onboarding-gate";
 import { loadProfile } from "@/lib/profile";
 
-export default function InterviewPage() {
-  requireOnboarding();
+export default async function InterviewPage() {
+  await requireOnboarding();
   const p = loadProfile();
   const title = p.preferences.current_title || p.preferences.target_titles?.[0] || "your target role";
   const prompts = [

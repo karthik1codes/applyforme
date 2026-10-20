@@ -8,11 +8,15 @@ const DB_PATH = process.env.APPLYFORME_DB ?? path.join(ROOT, "data", "applyforme
 export const OUTPUT_DIR = process.env.APPLYFORME_OUTPUT ?? path.join(ROOT, "output");
 export const PROFILE_PATH = path.join(ROOT, "profile.yaml");
 
-export const STATUSES = ["new", "matched", "skipped", "ready", "needs_feedback", "manual", "applied", "failed"] as const;
+export const STATUSES = [
+  "new", "matched", "skipped", "ready", "needs_feedback", "manual",
+  "in_progress", "awaiting_review", "blocked", "cancelled",
+  "applied", "failed",
+] as const;
 export type Status = (typeof STATUSES)[number];
 
 // Keep in sync with applyforme/store.py (both sides use CREATE IF NOT EXISTS).
-const SCHEMA = `
+export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY, company TEXT, title TEXT, location TEXT, url TEXT, job_json TEXT,
   score INTEGER, reasons TEXT, status TEXT DEFAULT 'new', cover_letter TEXT, notes TEXT,
@@ -27,6 +31,52 @@ CREATE TABLE IF NOT EXISTS events (
   title TEXT, body TEXT, ref TEXT, created_at TEXT, UNIQUE(job_id, ref)
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
+-- Mirrors applyforme/store.py: the Python applier and the dashboard share one
+-- state row per application.  The dashboard never edits \`state\`; it only
+-- requests cancellation and records one-shot submit authorization.
+CREATE TABLE IF NOT EXISTS apply_sessions (
+  job_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL DEFAULT 'IDLE',
+  step_count INTEGER NOT NULL DEFAULT 0,
+  state_attempts INTEGER NOT NULL DEFAULT 0,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  last_signature TEXT DEFAULT '',
+  duplicate_signature_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT DEFAULT '',
+  cancel_requested INTEGER NOT NULL DEFAULT 0,
+  submit_authorized_at TEXT,
+  submit_authorized_by TEXT,
+  submit_attempted_at TEXT,
+  submitted_at TEXT,
+  confirmation TEXT,
+  lock_owner TEXT,
+  lock_expires_at REAL,
+  created_at TEXT,
+  updated_at TEXT
+);
+-- Per-user LinkedIn OAuth connections. Tokens are AES-256-GCM encrypted.
+CREATE TABLE IF NOT EXISTS linkedin_connections (
+  user_id TEXT PRIMARY KEY,
+  member_id TEXT,
+  display_name TEXT,
+  email TEXT,
+  picture TEXT,
+  scope TEXT,
+  token_type TEXT,
+  access_token_enc TEXT,
+  refresh_token_enc TEXT,
+  expires_at TEXT,
+  connected_at TEXT,
+  updated_at TEXT,
+  last_error TEXT
+);
+CREATE TABLE IF NOT EXISTS linkedin_oauth_states (
+  state_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  created_at TEXT,
+  expires_at TEXT,
+  consumed_at TEXT
+);
 `;
 
 const g = globalThis as unknown as { __afmDb?: Database.Database };
@@ -54,6 +104,19 @@ type JobRow = {
 
 export type Job = {
   id: string; company: string; title: string; location: string; url: string;
+  ats: string;
+  applyUrl: string;
+  companyWebsite: string;
+  careersUrl: string;
+  companyLinkedin: string;
+  companyInfo: {
+    industry?: string;
+    openings_count?: number;
+    employee_count?: number;
+    funding_stage?: string;
+    description?: string;
+    recent_openings?: { title?: string; url?: string; location?: string }[];
+  };
   score: number | null; status: Status; category: string; notes: string | null;
   updatedAt: string; appliedAt: string | null;
   reasons: string[]; redFlags: string[];
@@ -78,8 +141,23 @@ const json = <T>(s: string | null | undefined, fallback: T): T => {
 function mapJob(r: JobRow): Job {
   const why = json<{ reasons?: string[]; red_flags?: string[] }>(r.reasons, {});
   const t = json<{ cover_letter?: string; resume_pdf?: string; resume_tex?: string }>(r.cover_letter, {});
+  const jj = json<{
+    ats?: string;
+    apply_url?: string;
+    company_website?: string;
+    careers_url?: string;
+    company_linkedin?: string;
+    company_info?: Job["companyInfo"];
+    description?: string;
+  }>(r.job_json, {});
   return {
     id: r.id, company: r.company, title: r.title, location: r.location ?? "", url: r.url,
+    ats: jj.ats || r.id.split(":")[0] || "",
+    applyUrl: jj.apply_url || r.url,
+    companyWebsite: jj.company_website || "",
+    careersUrl: jj.careers_url || "",
+    companyLinkedin: jj.company_linkedin || "",
+    companyInfo: jj.company_info || {},
     score: r.score, status: r.status, category: r.category ?? "Other", notes: r.notes,
     updatedAt: r.updated_at, appliedAt: r.applied_at,
     reasons: why.reasons ?? [], redFlags: why.red_flags ?? [],
@@ -88,18 +166,58 @@ function mapJob(r: JobRow): Job {
 }
 
 // -------------------------------------------------------------- queries ----
-export function listJobs(opts: { status?: Status | Status[]; limit?: number; order?: "recent" | "score" } = {}): Job[] {
+export function listJobs(opts: {
+  status?: Status | Status[];
+  limit?: number;
+  order?: "recent" | "score";
+  category?: string;
+  titleLike?: string;
+} = {}): Job[] {
   const st = opts.status ? (Array.isArray(opts.status) ? opts.status : [opts.status]) : [];
-  const where = st.length ? `WHERE status IN (${st.map(() => "?").join(",")})` : "";
+  const parts: string[] = [];
+  const args: unknown[] = [];
+  if (st.length) {
+    parts.push(`status IN (${st.map(() => "?").join(",")})`);
+    args.push(...st);
+  }
+  if (opts.category) {
+    parts.push("category = ?");
+    args.push(opts.category);
+  }
+  if (opts.titleLike) {
+    parts.push("title LIKE ?");
+    args.push(opts.titleLike);
+  }
+  const where = parts.length ? `WHERE ${parts.join(" AND ")}` : "";
   const order = opts.order === "score" ? "COALESCE(score,0) DESC, updated_at DESC" : "COALESCE(applied_at, updated_at) DESC";
-  const rows = db().prepare(`SELECT * FROM jobs ${where} ORDER BY ${order} LIMIT ?`).all(...st, opts.limit ?? 200) as JobRow[];
+  const rows = db().prepare(`SELECT * FROM jobs ${where} ORDER BY ${order} LIMIT ?`).all(...args, opts.limit ?? 200) as JobRow[];
+  return rows.map(mapJob);
+}
+
+/** Internships board — category tag and/or title keywords. */
+export function listInternships(limit = 200): Job[] {
+  const order = "COALESCE(score,0) DESC, updated_at DESC";
+  const rows = db()
+    .prepare(
+      `SELECT * FROM jobs
+       WHERE category = 'Internship'
+          OR title LIKE '%intern%'
+          OR title LIKE '%Intern%'
+          OR title LIKE '%trainee%'
+          OR title LIKE '%apprentice%'
+          OR title LIKE '%co-op%'
+          OR title LIKE '%Co-op%'
+       ORDER BY ${order} LIMIT ?`,
+    )
+    .all(limit) as JobRow[];
   return rows.map(mapJob);
 }
 
 export function getJob(id: string): (Job & { description: string }) | null {
   const r = db().prepare("SELECT * FROM jobs WHERE id=?").get(id) as JobRow | undefined;
   if (!r) return null;
-  return { ...mapJob(r), description: json<{ description?: string }>(r.job_json, {}).description ?? "" };
+  const j = mapJob(r);
+  return { ...j, description: json<{ description?: string }>(r.job_json, {}).description ?? "" };
 }
 
 export function statusCounts(): Record<string, number> {
@@ -120,6 +238,8 @@ export function overview() {
     appliedToday: one("SELECT COUNT(*) n FROM jobs WHERE status='applied' AND applied_at>=?", since(1)),
     needsFeedback: counts.needs_feedback ?? 0,
     ready: counts.ready ?? 0,
+    awaitingReview: (counts.awaiting_review ?? 0) + (counts.in_progress ?? 0),
+    blocked: (counts.blocked ?? 0) + (counts.manual ?? 0),
     avgScore: Math.round(one("SELECT COALESCE(AVG(score),0) n FROM jobs WHERE score IS NOT NULL")),
     replies: one("SELECT COUNT(*) n FROM events WHERE kind IN ('reply','interview','confirmation','rejection')"),
   };
@@ -190,6 +310,89 @@ export function resumesByCategory(): Record<string, Job[]> {
   const groups: Record<string, Job[]> = {};
   for (const j of jobs) (groups[j.category] ??= []).push(j);
   return groups;
+}
+
+// ------------------------------------------------------- apply sessions ----
+export type ApplySession = {
+  jobId: string;
+  state: string;
+  stepCount: number;
+  retryCount: number;
+  lastError: string;
+  cancelRequested: boolean;
+  submitAuthorizedAt: string | null;
+  submitAttemptedAt: string | null;
+  submittedAt: string | null;
+  confirmation: string | null;
+  lockOwner: string | null;
+  lockExpiresAt: number | null;
+};
+
+export function getApplySession(jobId: string): ApplySession | null {
+  const r = db().prepare("SELECT * FROM apply_sessions WHERE job_id=?").get(jobId) as
+    | {
+        job_id: string; state: string; step_count: number; retry_count: number; last_error: string;
+        cancel_requested: number; submit_authorized_at: string | null; submit_attempted_at: string | null;
+        submitted_at: string | null; confirmation: string | null; lock_owner: string | null;
+        lock_expires_at: number | null;
+      }
+    | undefined;
+  if (!r) return null;
+  return {
+    jobId: r.job_id,
+    state: r.state,
+    stepCount: r.step_count,
+    retryCount: r.retry_count,
+    lastError: r.last_error ?? "",
+    cancelRequested: !!r.cancel_requested,
+    submitAuthorizedAt: r.submit_authorized_at,
+    submitAttemptedAt: r.submit_attempted_at,
+    submittedAt: r.submitted_at,
+    confirmation: r.confirmation,
+    lockOwner: r.lock_owner,
+    lockExpiresAt: r.lock_expires_at ? Number(r.lock_expires_at) : null,
+  };
+}
+
+/** Record one explicit submit authorization for this application. */
+export function authorizeApply(jobId: string, by: string): boolean {
+  const now = new Date().toISOString();
+  db().prepare("INSERT OR IGNORE INTO apply_sessions (job_id, created_at, updated_at) VALUES (?,?,?)")
+    .run(jobId, now, now);
+  const r = db()
+    .prepare(
+      `UPDATE apply_sessions
+       SET submit_authorized_at=?, submit_authorized_by=?, cancel_requested=0, updated_at=?
+       WHERE job_id=? AND (submitted_at IS NULL OR submitted_at='')`,
+    )
+    .run(now, by, now, jobId);
+  return r.changes > 0;
+}
+
+export function clearApplyAuthorization(jobId: string): void {
+  db().prepare("UPDATE apply_sessions SET submit_authorized_at=NULL, submit_authorized_by=NULL, updated_at=? WHERE job_id=?")
+    .run(new Date().toISOString(), jobId);
+}
+
+/** Ask the running Python applier to stop at the next state boundary. */
+export function requestApplyCancel(jobId: string): void {
+  const now = new Date().toISOString();
+  db().prepare("INSERT OR IGNORE INTO apply_sessions (job_id, created_at, updated_at) VALUES (?,?,?)")
+    .run(jobId, now, now);
+  db().prepare("UPDATE apply_sessions SET cancel_requested=1, updated_at=? WHERE job_id=?").run(now, jobId);
+  addEvent(jobId, "cancel_requested", "Application cancellation requested", "");
+}
+
+export function clearApplyCancel(jobId: string): void {
+  db().prepare("UPDATE apply_sessions SET cancel_requested=0, updated_at=? WHERE job_id=?")
+    .run(new Date().toISOString(), jobId);
+}
+
+export function submissionRecorded(jobId: string): boolean {
+  const r = db().prepare("SELECT submitted_at FROM apply_sessions WHERE job_id=?").get(jobId) as
+    | { submitted_at: string | null }
+    | undefined;
+  return !!r?.submitted_at;
 }
 
 export function addEvent(jobId: string, kind: string, title: string, body = "") {

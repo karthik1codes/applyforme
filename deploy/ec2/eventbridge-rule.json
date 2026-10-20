@@ -1,26 +1,49 @@
 {
-  "Comment": "AWS EventBridge rule: hit the public pipeline webhook every 4 hours. Replace DOMAIN and SECRET.",
-  "Name": "applyforme-run",
-  "ScheduleExpression": "rate(4 hours)",
-  "State": "ENABLED",
-  "Targets": [
+  "Comment": "Optional AWS EventBridge triggers (on-box SCHEDULE_* cron is preferred). Replace DOMAIN and SECRET.",
+  "Rules": [
     {
-      "Id": "1",
-      "Arn": "arn:aws:events:REGION:ACCOUNT:api-destination/applyforme-pipeline",
-      "RoleArn": "arn:aws:iam::ACCOUNT:role/EventBridgeApiDestinationRole",
-      "HttpParameters": {
-        "HeaderParameters": {
-          "Authorization": "Bearer PIPELINE_WEBHOOK_SECRET",
-          "Content-Type": "application/json"
+      "Name": "applyforme-jobs-run",
+      "ScheduleExpression": "rate(4 hours)",
+      "State": "ENABLED",
+      "Targets": [
+        {
+          "Id": "jobs",
+          "Arn": "arn:aws:events:REGION:ACCOUNT:api-destination/applyforme-pipeline",
+          "RoleArn": "arn:aws:iam::ACCOUNT:role/EventBridgeApiDestinationRole",
+          "HttpParameters": {
+            "HeaderParameters": {
+              "Authorization": "Bearer PIPELINE_WEBHOOK_SECRET",
+              "Content-Type": "application/json"
+            }
+          },
+          "Input": "{\"stage\":\"run\",\"limit\":40,\"async\":true}"
         }
-      },
-      "Input": "{\"stage\":\"run\",\"limit\":40,\"async\":true}"
+      ]
+    },
+    {
+      "Name": "applyforme-internships",
+      "ScheduleExpression": "rate(6 hours)",
+      "State": "ENABLED",
+      "Targets": [
+        {
+          "Id": "internships",
+          "Arn": "arn:aws:events:REGION:ACCOUNT:api-destination/applyforme-pipeline",
+          "RoleArn": "arn:aws:iam::ACCOUNT:role/EventBridgeApiDestinationRole",
+          "HttpParameters": {
+            "HeaderParameters": {
+              "Authorization": "Bearer PIPELINE_WEBHOOK_SECRET",
+              "Content-Type": "application/json"
+            }
+          },
+          "Input": "{\"stage\":\"internships\",\"limit\":40,\"async\":true}"
+        }
+      ]
     }
   ],
   "_setup_notes": [
     "1. Create an API Destination pointing to https://YOUR_DOMAIN/api/pipeline/webhook (POST)",
-    "2. Connection auth type: API Key or include Bearer in header parameters as above",
-    "3. Keep EC2 security group: inbound 80/443 from 0.0.0.0/0 (or CloudFront); 8787 closed",
-    "4. Prefer the on-box SCHEDULE_RUN cron (no AWS fees) unless you need multi-region triggers"
+    "2. Connection auth: Bearer PIPELINE_WEBHOOK_SECRET",
+    "3. EC2 security group: inbound 80/443; keep 8787 closed (worker is localhost-only)",
+    "4. Prefer on-box SCHEDULE_RUN / SCHEDULE_INTERNSHIPS inside applyforme-worker (no EventBridge fees)"
   ]
 }

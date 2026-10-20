@@ -1,65 +1,74 @@
 "use client";
 
 import Link from "next/link";
-import { AsciiFluid } from "@/components/ui/ascii-fluid";
-import { DitherScan } from "@/components/ui/dither-scan";
 import { GoogleSignIn } from "@/components/landing/google-sign-in";
 import { ResumeUpload } from "@/components/landing/resume-upload";
+import { logout } from "@/app/actions/auth";
 
 type Props = {
   signedIn: boolean;
   hasResume: boolean;
+  onboardingDone: boolean;
   userName?: string | null;
   authOff: boolean;
   next?: string;
+  referralCode?: string;
+  signedOut?: boolean;
 };
 
-export function LandingHero({ signedIn, hasResume, userName, authOff, next }: Props) {
+export function LandingHero({
+  signedIn,
+  hasResume,
+  onboardingDone,
+  userName,
+  authOff,
+  next,
+  referralCode,
+  signedOut,
+}: Props) {
+  const onboardingHref = referralCode
+    ? `/onboarding?ref=${encodeURIComponent(referralCode)}`
+    : "/onboarding";
+  const afterSignIn = next?.startsWith("/onboarding")
+    ? next
+    : referralCode
+      ? `/onboarding?ref=${encodeURIComponent(referralCode)}`
+      : "/onboarding";
+  const dashHref = onboardingDone ? "/home" : onboardingHref;
+
   return (
     <div className="relative min-h-svh overflow-hidden bg-black text-white">
-      {/* Full-bleed dithered highland — the visual plane of the first viewport */}
       <div className="absolute inset-0">
-        <DitherScan
+        {/* eslint-disable-next-line @next/next/no-img-element -- public static hero asset */}
+        <img
           src="/landing-hero.png"
           alt="Sunlit ruins of the Roman Forum under a blue sky"
-          passes={4}
-          duration={1400}
-          pixelSize={6}
-          blur={6}
-          angle={45}
-          loop
-          theme="dark"
-          colors={["#1a1208", "#ff4c00"]}
-          className="!aspect-auto h-full min-h-svh w-full"
+          className="absolute inset-0 h-full min-h-svh w-full object-cover"
         />
         <div className="absolute inset-0 bg-gradient-to-t from-black via-black/55 to-black/25" />
       </div>
-
-      {/* Cursor fluid sits above the image, under the copy */}
-      <AsciiFluid
-        cellSize={12}
-        force={1}
-        dissipation={0.05}
-        brush={0.55}
-        animate
-        theme="dark"
-        color="#ff4c00"
-        backgroundColor="transparent"
-        className="z-[1] opacity-70"
-      />
 
       <header className="relative z-10 flex items-center justify-between px-6 py-5 md:px-10">
         <span className="font-[family-name:var(--font-landing-display)] text-xl font-medium tracking-tight md:text-2xl">
           applyforme
         </span>
-        {signedIn || authOff ? (
-          <Link href={hasResume ? "/home" : "/onboarding"} className="text-base font-medium underline underline-offset-4">
-            Open dashboard
-          </Link>
+        {signedIn ? (
+          <div className="flex items-center gap-4">
+            <Link href={dashHref} className="text-base font-medium underline underline-offset-4">
+              {onboardingDone ? "Open dashboard" : "Continue setup"}
+            </Link>
+            {!authOff ? (
+              <form action={logout}>
+                <button type="submit" className="text-base font-medium text-white/80 underline underline-offset-4 hover:text-white">
+                  Sign out
+                </button>
+              </form>
+            ) : null}
+          </div>
         ) : (
-          <Link href="#start" className="text-base font-medium underline underline-offset-4">
-            Get started
-          </Link>
+          <a href="#start" className="text-base font-medium underline underline-offset-4">
+            Start applying
+          </a>
         )}
       </header>
 
@@ -72,10 +81,34 @@ export function LandingHero({ signedIn, hasResume, userName, authOff, next }: Pr
             Agents discover roles, tailor your resume, and apply — you stay in control.
           </p>
 
+          {signedOut && !signedIn ? (
+            <p className="mt-4 max-w-xl text-sm font-medium text-white/75">
+              You&apos;re signed out. Click <span className="text-white">Start applying</span> to sign in with Google and continue onboarding.
+            </p>
+          ) : null}
+
           <div className="mt-8 flex flex-wrap items-center gap-3">
-            {!signedIn && !authOff && <GoogleSignIn next={next || "/onboarding"} />}
-            {(signedIn || authOff) && !hasResume && <ResumeUpload />}
-            {(signedIn || authOff) && hasResume && (
+            {!signedIn && !authOff && <GoogleSignIn next={afterSignIn} label="Start applying" />}
+            {!signedIn && authOff && (
+              <Link
+                href={onboardingHref}
+                className="inline-flex min-h-10 min-w-[160px] items-center justify-center rounded border border-transparent bg-white px-4 py-2 text-base font-normal text-black"
+              >
+                Start applying
+              </Link>
+            )}
+            {signedIn && !onboardingDone && (
+              <Link
+                href={onboardingHref}
+                className="inline-flex min-h-10 min-w-[160px] items-center justify-center rounded border border-transparent bg-white px-4 py-2 text-base font-normal text-black"
+              >
+                Continue setup
+              </Link>
+            )}
+            {signedIn && onboardingDone && !hasResume && (
+              <ResumeUpload redirectTo="/onboarding?resume=1" />
+            )}
+            {signedIn && onboardingDone && hasResume && (
               <Link
                 href="/home"
                 className="inline-flex min-h-10 min-w-[160px] items-center justify-center rounded border border-transparent bg-white px-4 py-2 text-base font-normal text-black"
@@ -83,20 +116,12 @@ export function LandingHero({ signedIn, hasResume, userName, authOff, next }: Pr
                 {userName ? `Go to dashboard, ${userName.split(" ")[0]}` : "Go to dashboard"}
               </Link>
             )}
-            {!signedIn && !authOff && (
+            {!signedIn && (
               <Link
                 href="#how"
                 className="inline-flex min-h-10 min-w-[120px] items-center justify-center rounded border border-white bg-transparent px-4 py-2 text-base font-normal text-white"
               >
                 How it works
-              </Link>
-            )}
-            {authOff && (
-              <Link
-                href="/home"
-                className="inline-flex min-h-10 min-w-[120px] items-center justify-center rounded border border-white bg-transparent px-4 py-2 text-base font-normal text-white"
-              >
-                Open dashboard
               </Link>
             )}
           </div>

@@ -24,11 +24,21 @@ const RANGES: Record<string, { label: string; days: number }> = {
 
 export function ChartAreaInteractive({ data }: { data: Point[] }) {
   const isMobile = useIsMobile()
-  // Phones default to 7 days; once the user picks a range, theirs wins.
-  const [picked, setRange] = React.useState<string | null>(null)
-  const range = picked ?? (isMobile ? "7d" : "30d")
+  // Default must match SSR (always 30d). Mobile shortens after mount only.
+  const [range, setRange] = React.useState("30d")
+  const [userPicked, setUserPicked] = React.useState(false)
+
+  React.useEffect(() => {
+    if (userPicked || !isMobile) return
+    const t = setTimeout(() => setRange("7d"), 0)
+    return () => clearTimeout(t)
+  }, [isMobile, userPicked])
 
   const filtered = data.slice(-RANGES[range].days)
+  const pick = (v: string) => {
+    setUserPicked(true)
+    setRange(v)
+  }
 
   return (
     <Card className="@container/card">
@@ -39,7 +49,7 @@ export function ChartAreaInteractive({ data }: { data: Point[] }) {
           <ToggleGroup
             multiple={false}
             value={[range]}
-            onValueChange={(v) => setRange(v[0] ?? "30d")}
+            onValueChange={(v) => pick(v[0] ?? "30d")}
             variant="outline"
             className="hidden *:data-[slot=toggle-group-item]:px-4! @[767px]/card:flex"
           >
@@ -49,7 +59,7 @@ export function ChartAreaInteractive({ data }: { data: Point[] }) {
               </ToggleGroupItem>
             ))}
           </ToggleGroup>
-          <Select value={range} onValueChange={(v) => v !== null && setRange(v)}>
+          <Select value={range} onValueChange={(v) => v !== null && pick(v)}>
             <SelectTrigger className="flex w-40 **:data-[slot=select-value]:block **:data-[slot=select-value]:truncate @[767px]/card:hidden" size="sm" aria-label="Select range">
               <SelectValue placeholder="Last 30 days" />
             </SelectTrigger>

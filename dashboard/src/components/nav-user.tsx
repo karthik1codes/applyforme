@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { LogOutIcon } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from "@/components/ui/sidebar";
@@ -28,16 +27,14 @@ export function NavUser({
       </SidebarMenuItem>
       <SidebarMenuItem>
         <form action={logout}>
-          <SidebarMenuButton type="submit" className="text-muted-foreground">
+          <SidebarMenuButton
+            type="submit"
+            className="bg-muted/50 font-medium text-foreground hover:bg-muted"
+          >
             <LogOutIcon />
             <span>Sign out</span>
           </SidebarMenuButton>
         </form>
-      </SidebarMenuItem>
-      <SidebarMenuItem>
-        <SidebarMenuButton render={<Link href="/" />}>
-          <span className="text-xs text-muted-foreground">Landing page</span>
-        </SidebarMenuButton>
       </SidebarMenuItem>
     </SidebarMenu>
   );

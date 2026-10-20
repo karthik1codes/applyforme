@@ -10,6 +10,7 @@ resume.txt
 # Runtime / generated
 data/
 output/
+.firecrawl/
 __pycache__/
 *.pyc
 .pytest_cache/

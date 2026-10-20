@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import { auth, authDisabled } from "@/auth";
+import { importResumeIntoProfile } from "@/lib/import-resume";
 import { saveResume, upsertUser } from "@/lib/users";
 
 export const runtime = "nodejs";
+export const maxDuration = 120;
 
 export async function POST(req: Request) {
   const session = await auth();
@@ -23,7 +25,21 @@ export async function POST(req: Request) {
   try {
     const buf = Buffer.from(await file.arrayBuffer());
     const saved = saveResume(userId, file.name, buf);
-    return NextResponse.json({ ok: true, name: saved.publicName });
+
+    // Parse full resume into profile.yaml so Profile fields + Tailor PDFs update immediately.
+    const imported = importResumeIntoProfile(saved.path);
+
+    return NextResponse.json({
+      ok: true,
+      name: saved.publicName,
+      imported: imported.ok,
+      roles: imported.roles,
+      skills: imported.skills,
+      education: imported.education,
+      projects: imported.projects,
+      honors: imported.honors,
+      importMessage: imported.message,
+    });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : "Upload failed" }, { status: 400 });
   }

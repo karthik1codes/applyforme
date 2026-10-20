@@ -6,19 +6,47 @@ import { loadProfile } from "@/lib/profile";
 export default async function PreferencesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ saved?: string }>;
+  searchParams: Promise<{ saved?: string; refreshing?: string }>;
 }) {
-  requireOnboarding();
-  const { saved } = await searchParams;
+  await requireOnboarding();
+  const { saved, refreshing } = await searchParams;
   const pref = loadProfile().preferences;
 
   return (
     <PageContainer
       title="Preferences"
-      description="What you're looking for right now. Agents re-read this on every discover / match run — junior level blocks Senior/Staff/Lead titles."
+      description="What you're looking for right now. Saving refreshes your Jobs board — junior level blocks Senior/Staff/Lead titles."
     >
-      {saved && <p className="mb-4 text-sm text-emerald-600">Saved. Re-run discover to refresh the Jobs list.</p>}
+      {saved && (
+        <p className="mb-4 text-sm text-emerald-600">
+          Saved{refreshing ? " — searching for new roles that match." : "."}
+        </p>
+      )}
       <form action={savePreferences} className="max-w-xl space-y-4">
+        <fieldset className="space-y-2">
+          <legend className="text-sm font-medium">What should agents search for?</legend>
+          <p className="text-xs text-muted-foreground">Jobs and internships use separate pipelines and can run in parallel.</p>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {[
+              { id: "jobs", label: "Full-time jobs" },
+              { id: "internships", label: "Internships only" },
+              { id: "both", label: "Jobs + internships" },
+            ].map((opt) => (
+              <label
+                key={opt.id}
+                className="flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm has-[:checked]:border-foreground has-[:checked]:bg-muted/40"
+              >
+                <input
+                  type="radio"
+                  name="search_focus"
+                  value={opt.id}
+                  defaultChecked={(pref.search_focus || "jobs") === opt.id}
+                />
+                {opt.label}
+              </label>
+            ))}
+          </div>
+        </fieldset>
         <label className="block space-y-1 text-sm">
           <span className="font-medium">Seniority</span>
           <select name="seniority_level" defaultValue={pref.seniority_level || "mid"} className="w-full rounded-md border bg-background px-3 py-2">

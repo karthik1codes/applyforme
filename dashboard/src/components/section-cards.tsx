@@ -32,7 +32,7 @@ export function SectionCards({ o }: { o: Overview }) {
     <div className="grid grid-cols-1 gap-4 px-4 *:data-[slot=card]:bg-linear-to-t *:data-[slot=card]:from-primary/5 *:data-[slot=card]:to-card *:data-[slot=card]:shadow-xs lg:px-6 @xl/main:grid-cols-2 @5xl/main:grid-cols-4 dark:*:data-[slot=card]:bg-card">
       <Kpi label="Jobs applied" value={o.applied} badge={`+${o.appliedToday} today`} line={`${o.appliedWeek} in the last 7 days`} sub="Submitted applications" href="/applications" />
       <Kpi label="Needs your feedback" value={o.needsFeedback} badge={o.needsFeedback ? "action" : "clear"} line={o.needsFeedback ? "Agents are waiting on you" : "Nothing blocked"} sub="Required questions the agent couldn't answer" href="/feedback" />
-      <Kpi label="Ready to apply" value={o.ready} line="Tailored resume + cover letter done" sub={`Run: python -m applyforme apply`} href="/applications" />
+      <Kpi label="Awaiting your review" value={o.awaitingReview} line={o.awaitingReview ? "Form filled — check it, then submit" : "Nothing waiting on you"} sub="Open a role → review and submit" href="/applications?status=review" />
       <Kpi label="Average match score" value={o.avgScore || "-"} badge={`${o.total} jobs`} line="Across all scored jobs" sub={`${o.replies} employer repl${o.replies === 1 ? "y" : "ies"} tracked`} href="/inbox" />
     </div>
   )

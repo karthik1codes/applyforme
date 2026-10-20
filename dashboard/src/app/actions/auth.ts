@@ -1,11 +1,8 @@
 "use server";
 
-import { signIn, signOut } from "@/auth";
+import { signOut } from "@/auth";
 
-export async function googleSignIn(callbackUrl = "/onboarding") {
-  await signIn("google", { redirectTo: callbackUrl });
-}
-
+/** End the session and send the user to the landing page Start applying CTA. */
 export async function logout() {
-  await signOut({ redirectTo: "/" });
+  await signOut({ redirectTo: "/?signedout=1" });
 }

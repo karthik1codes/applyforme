@@ -1,16 +1,17 @@
 [Unit]
-Description=applyforme Next.js dashboard
-After=network.target applyforme-worker.service
+Description=applyforme Next.js dashboard (EC2)
+After=network-online.target applyforme-worker.service
+Wants=applyforme-worker.service
 
 [Service]
 Type=simple
-User=ubuntu
+User=ec2-user
 WorkingDirectory=/opt/applyforme/dashboard
 EnvironmentFile=/opt/applyforme/.env
-# Next loads root .env via next.config; expose worker URL for the proxy.
 Environment=PIPELINE_WORKER_URL=http://127.0.0.1:8787
 Environment=NODE_ENV=production
 Environment=PORT=3000
+Environment=HOSTNAME=0.0.0.0
 ExecStart=/usr/bin/npm run start -- -p 3000
 Restart=always
 RestartSec=5

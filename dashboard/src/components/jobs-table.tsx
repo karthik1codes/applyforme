@@ -21,9 +21,10 @@ export function JobsTable({ jobs, empty = "Nothing here yet." }: { jobs: Job[]; 
           <TableRow>
             <TableHead className="w-16">Match</TableHead>
             <TableHead>Role</TableHead>
-            <TableHead className="hidden md:table-cell">Category</TableHead>
+            <TableHead className="hidden md:table-cell">Links</TableHead>
+            <TableHead className="hidden lg:table-cell">Category</TableHead>
             <TableHead>Status</TableHead>
-            <TableHead className="hidden lg:table-cell text-right">Updated</TableHead>
+            <TableHead className="hidden xl:table-cell text-right">Updated</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -40,12 +41,28 @@ export function JobsTable({ jobs, empty = "Nothing here yet." }: { jobs: Job[]; 
                 </div>
               </TableCell>
               <TableCell className="hidden md:table-cell">
+                <div className="flex flex-col gap-0.5 text-xs">
+                  <a href={j.applyUrl || j.url} target="_blank" rel="noreferrer" className="text-sky-600 hover:underline dark:text-sky-400">
+                    Posting
+                  </a>
+                  {j.careersUrl ? (
+                    <a href={j.careersUrl} target="_blank" rel="noreferrer" className="text-muted-foreground hover:underline">
+                      Careers
+                    </a>
+                  ) : j.companyWebsite ? (
+                    <a href={j.companyWebsite} target="_blank" rel="noreferrer" className="text-muted-foreground hover:underline">
+                      Company
+                    </a>
+                  ) : null}
+                </div>
+              </TableCell>
+              <TableCell className="hidden lg:table-cell">
                 <Badge variant="outline">{j.category}</Badge>
               </TableCell>
               <TableCell>
                 <StatusBadge status={j.status} />
               </TableCell>
-              <TableCell className="hidden lg:table-cell text-right text-muted-foreground">{timeAgo(j.appliedAt ?? j.updatedAt)}</TableCell>
+              <TableCell className="hidden xl:table-cell text-right text-muted-foreground">{timeAgo(j.appliedAt ?? j.updatedAt)}</TableCell>
             </TableRow>
           ))}
         </TableBody>

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { FindJobsButton } from "@/components/find-jobs-button";
 import { PageContainer } from "@/components/page-container";
 import { timeAgo } from "@/components/jobs-table";
 import { Badge } from "@/components/ui/badge";
@@ -25,8 +26,11 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ k
   return (
     <PageContainer
       title="Applied inbox"
-      description="Everything that happened after you applied: submissions, plus employer emails when IMAP is configured (python -m applyforme inbox)."
+      description="Submissions and employer replies. Configure IMAP once in Settings / .env — then check inbox from here."
     >
+      <div className="mb-3 flex justify-end">
+        <FindJobsButton label="Check inbox now" stage="inbox" size="sm" variant="outline" />
+      </div>
       <div className="flex flex-wrap gap-2">
         <Link href="/inbox" className={cn("rounded-full border px-3 py-1 text-sm", !active ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")}>
           All <span className="tabular-nums opacity-70">{total}</span>
@@ -40,9 +44,12 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ k
 
       {events.length === 0 && (
         <Card>
-          <CardContent className="py-10 text-center text-sm text-muted-foreground">
-            No messages yet. Submissions appear here automatically; add <code>IMAP_HOST</code>, <code>IMAP_USER</code> and <code>IMAP_PASSWORD</code> to
-            <code> .env</code> and run <code>python -m applyforme inbox</code> to pull in employer replies.
+          <CardContent className="flex flex-col items-center gap-4 py-10 text-center text-sm text-muted-foreground">
+            <p>
+              No messages yet. Submissions land here automatically. To pull employer emails, add IMAP credentials to your{" "}
+              <code className="rounded bg-muted px-1">.env</code>, then tap Check inbox.
+            </p>
+            <FindJobsButton label="Check inbox now" stage="inbox" size="lg" variant="outline" />
           </CardContent>
         </Card>
       )}

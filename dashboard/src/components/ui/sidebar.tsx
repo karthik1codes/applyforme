@@ -66,7 +66,14 @@ function SidebarProvider({
   open?: boolean
   onOpenChange?: (open: boolean) => void
 }) {
-  const isMobile = useIsMobile()
+  const isMobileRaw = useIsMobile()
+  // Keep SSR + first paint on the desktop tree to avoid hydration attribute mismatches.
+  const [mounted, setMounted] = React.useState(false)
+  React.useEffect(() => {
+    const t = setTimeout(() => setMounted(true), 0)
+    return () => clearTimeout(t)
+  }, [])
+  const isMobile = mounted && isMobileRaw
   const [openMobile, setOpenMobile] = React.useState(false)
 
   // This is the internal state of the sidebar.

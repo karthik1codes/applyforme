@@ -1,72 +1,144 @@
-# Push applyforme to EC2 and go live
+# Deploy & run applyforme on AWS EC2 (Amazon Linux · `ec2-user`)
 
-Replace `YOUR_EC2_IP` (or use your domain) and the key path.
+SSH user is **`ec2-user`** (not `ubuntu`). systemd runs `applyforme-worker` + `applyforme-web` as that user. Port **8787** stays on localhost.
 
-## 1. First time (new instance)
+## First time on an existing Amazon Linux instance
 
 ```bash
-# On your laptop — copy the repo up (or clone from GitHub on the box)
-ssh -i ~/.ssh/your-key.pem ubuntu@YOUR_EC2_IP
+# From your laptop
+ssh -i ~/.ssh/your-key.pem ec2-user@YOUR_EC2_IP
 
+# On the instance
 sudo mkdir -p /opt/applyforme
-sudo chown ubuntu:ubuntu /opt/applyforme
+sudo chown ec2-user:ec2-user /opt/applyforme
 git clone https://github.com/YOUR_USER/applyforme.git /opt/applyforme
 cd /opt/applyforme
 
-# Secrets
 cp .env.example .env
-nano .env   # OPENAI_API_KEY, PIPELINE_WEBHOOK_SECRET, APP_URL=https://your.domain, AUTH_*, Google OAuth…
+nano .env
+# set at least:
+#   OPENAI_API_KEY=…
+#   CRUSTDATA_API_KEY=…   (optional but recommended)
+#   APP_URL=http://YOUR_EC2_IP
+#   PIPELINE_WEBHOOK_SECRET=…  (or let setup.sh generate one)
 
 sudo bash deploy/ec2/setup.sh
 ```
 
-Point DNS A-record at the instance, then:
+`setup.sh` detects Amazon Linux, installs deps with `dnf`/`yum`, sets `User=ec2-user` in systemd, and configures nginx under `/etc/nginx/conf.d/`.
+
+## After setup — secrets & restart
 
 ```bash
-sudo apt-get install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d your.domain
-```
+ssh -i ~/.ssh/your-key.pem ec2-user@YOUR_EC2_IP
 
-Open security group: **22** (your IP), **80**, **443**. Do **not** open **8787**.
-
-## 2. Every update (push new code)
-
-From your laptop:
-
-```bash
-git add -A
-git commit -m "your message"
-git push origin main
-```
-
-On EC2:
-
-```bash
-ssh -i ~/.ssh/your-key.pem ubuntu@YOUR_EC2_IP
-cd /opt/applyforme
-git pull origin main
-sudo bash deploy/ec2/setup.sh
-# or faster if deps unchanged:
-#   cd dashboard && npm ci && npm run build
-#   sudo systemctl restart applyforme-worker applyforme-web
-```
-
-## 3. Check it’s live
-
-```bash
-curl -s http://127.0.0.1:8787/health
-curl -s https://your.domain/api/pipeline/webhook
+sudo nano /opt/applyforme/.env
+sudo systemctl restart applyforme-worker applyforme-web
 sudo systemctl status applyforme-worker applyforme-web --no-pager
+
+curl -s http://127.0.0.1:8787/health
 ```
 
-Trigger a search:
+## Everyday updates
 
 ```bash
-source /opt/applyforme/.env
-curl -X POST https://your.domain/api/pipeline/webhook \
+ssh -i ~/.ssh/your-key.pem ec2-user@YOUR_EC2_IP
+cd /opt/applyforme
+git pull
+sudo bash deploy/ec2/setup.sh
+```
+
+Faster (code-only, deps unchanged):
+
+```bash
+cd /opt/applyforme/dashboard && npm ci && npm run build
+sudo systemctl restart applyforme-worker applyforme-web
+```
+
+## Trigger pipelines
+
+```bash
+ssh -i ~/.ssh/your-key.pem ec2-user@YOUR_EC2_IP
+set -a; source /opt/applyforme/.env; set +a
+
+# Jobs lane
+curl -X POST http://127.0.0.1:3000/api/pipeline/webhook \
   -H "Authorization: Bearer $PIPELINE_WEBHOOK_SECRET" \
   -H "Content-Type: application/json" \
   -d '{"stage":"run","limit":40}'
+
+# Internships lane (parallel)
+curl -X POST http://127.0.0.1:3000/api/pipeline/webhook \
+  -H "Authorization: Bearer $PIPELINE_WEBHOOK_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"stage":"internships","limit":40}'
 ```
 
-Or open **Settings** in the dashboard → **Find new jobs now**.
+Or open `http://YOUR_EC2_IP` → **Settings** / **Internships**.
+
+## Fresh listings & retention
+
+Every fetch records `last_seen_at` per listing, then automatically:
+
+- removes cross-board duplicates (same role, including company-name variants)
+- drops untouched `new` / `matched` / `skipped` rows older than `JOB_RETENTION_DAYS` (default **10**)
+- leaves `applied`, `ready` (tailored), `manual`, and in-progress jobs untouched
+
+```bash
+ssh -i ~/.ssh/your-key.pem ec2-user@YOUR_EC2_IP
+cd /opt/applyforme
+
+# Preview what would be removed
+.venv/bin/python -m applyforme cleanup --dry-run
+
+# Apply now (also runs after every discover / internships run)
+.venv/bin/python -m applyforme cleanup
+
+# Change the window: 7 days, or 0 to disable
+sudo sed -i 's/^JOB_RETENTION_DAYS=.*/JOB_RETENTION_DAYS=7/' .env
+sudo systemctl restart applyforme-worker
+```
+
+Trigger the same maintenance through the worker:
+
+```bash
+set -a; source /opt/applyforme/.env; set +a
+curl -X POST http://127.0.0.1:8787/hooks/cleanup \
+  -H "Authorization: Bearer $PIPELINE_WEBHOOK_SECRET"
+```
+
+## Logs
+
+```bash
+sudo journalctl -u applyforme-worker -f
+sudo journalctl -u applyforme-web -f
+sudo tail -f /var/log/applyforme-userdata.log   # if launched with user-data
+```
+
+## Security group
+
+| Port | Open? |
+|------|--------|
+| 22 | your IP only |
+| 80 / 443 | yes (public or LB) |
+| **8787** | **no** — localhost only |
+
+## Optional: launch a new Amazon Linux 2023 box
+
+```bash
+export AWS_REGION=ap-south-1
+export KEY_NAME=your-keypair
+export APPLYFORME_REPO_URL=https://github.com/YOUR_USER/applyforme.git
+export ALLOCATE_EIP=1          # optional: stable public IP
+bash deploy/ec2/launch-ec2.sh
+# SSH as: ssh -i ~/.ssh/your-keypair.pem ec2-user@PUBLIC_IP
+```
+
+## TLS (certbot on Amazon Linux)
+
+```bash
+sudo dnf install -y certbot python3-certbot-nginx   # or: sudo yum install …
+sudo certbot --nginx -d your.domain
+# set APP_URL=https://your.domain in .env, then:
+sudo systemctl restart applyforme-worker applyforme-web
+```

@@ -5,6 +5,7 @@ import {
   BookmarkIcon,
   BriefcaseBusinessIcon,
   CreditCardIcon,
+  GiftIcon,
   FilePenLineIcon,
   FileTextIcon,
   GaugeIcon,
@@ -17,6 +18,7 @@ import {
   Settings2Icon,
   SettingsIcon,
   SlidersHorizontalIcon,
+  GraduationCapIcon,
   UserIcon,
 } from "lucide-react";
 
@@ -62,6 +64,7 @@ export function AppSidebar({
           items={[
             { title: "Dashboard", url: "/home", icon: <LayoutDashboardIcon /> },
             { title: "Jobs", url: "/jobs", icon: <SearchIcon />, badge: jobsCount || undefined },
+            { title: "Internships", url: "/internships", icon: <GraduationCapIcon /> },
             { title: "Applications", url: "/applications", icon: <ListChecksIcon /> },
             { title: "Inbox", url: "/inbox", icon: <InboxIcon />, badge: inboxCount || undefined },
           ]}
@@ -86,6 +89,7 @@ export function AppSidebar({
           label="Account"
           items={[
             { title: "Profile", url: "/profile", icon: <UserIcon /> },
+            { title: "Referral", url: "/referral", icon: <GiftIcon /> },
             { title: "Billing", url: "/billing", icon: <CreditCardIcon /> },
             { title: "Settings", url: "/settings", icon: <SettingsIcon /> },
             { title: "Feedback", url: "/feedback", icon: <MessageSquareIcon />, badge: feedbackCount || undefined },

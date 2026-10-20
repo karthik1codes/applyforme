@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import {
   SidebarGroup,
@@ -22,7 +23,16 @@ export type NavItem = {
 
 export function NavSection({ label, items }: { label: string; items: NavItem[] }) {
   const path = usePathname();
-  const active = (url: string) => path === url || (url !== "/home" && path.startsWith(url));
+  // isActive / data-active must match SSR on first paint (always inactive), then update.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setMounted(true), 0);
+    return () => clearTimeout(t);
+  }, []);
+
+  const active = (url: string) =>
+    mounted && (path === url || (url !== "/home" && path.startsWith(url)));
+
   return (
     <SidebarGroup>
       <SidebarGroupLabel className="text-[11px] font-medium tracking-wider text-muted-foreground/80 uppercase">

@@ -14,7 +14,7 @@ HARD RULES:
 - Do not use em dashes. No placeholders like [Company]. Output only the letter itself, no commentary.
 - Sign off with the candidate's first and last name."""
 
-ATTEMPTS = 3
+ATTEMPTS = 2  # each attempt is a full LLM round-trip; keep retries tight
 
 
 def tailor(job: Job, profile: Profile, keywords: list[str] | None = None) -> Tailored:

@@ -6,9 +6,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { overview } from "@/lib/db";
+import { requireOnboarding } from "@/lib/onboarding-gate";
 import { connectLink, getWa, waConfig } from "@/lib/whatsapp";
 
-export default function Page() {
+export default async function Page() {
+  await requireOnboarding();
   const cfg = waConfig();
   let wa = getWa();
   if (wa.status === "pending" && wa.expiresAt && new Date(wa.expiresAt) < new Date()) wa = { status: "disconnected" };

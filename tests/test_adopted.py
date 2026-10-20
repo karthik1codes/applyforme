@@ -43,17 +43,18 @@ def test_tailor_retries_with_fresh_prompt_then_succeeds(monkeypatch):
     assert out.cover_letter.startswith("Dear")
 
 
-def test_tailor_gives_up_after_three_bad_drafts(monkeypatch):
+def test_tailor_gives_up_after_two_bad_drafts(monkeypatch):
     monkeypatch.setattr(T, "ask_json", lambda *a, **k: Tailored(cover_letter="too short"))
     prof = load_profile(ROOT / "profile.example.yaml")
     try:
         T.tailor(Job(id="x:y:1", ats="x", company="Y", title="Eng", url="u"), prof)
         raise AssertionError("should have raised")
     except RuntimeError as e:
-        assert "3 attempts" in str(e)
+        assert f"{T.ATTEMPTS} attempts" in str(e)
 
 
 def test_judge_rejects_resume_with_invented_work(monkeypatch):
+    monkeypatch.setenv("APPLYFORME_JUDGE", "1")
     prof = load_profile(ROOT / "profile.example.yaml")
     base = R._baseline(prof)
     monkeypatch.setattr(R, "ask_json", lambda system, user, schema, **k:
@@ -83,10 +84,22 @@ def test_closed_detection():
 def test_submission_classification_never_assumes_success():
     f = "https://x.com/apply"
     assert classify_submission("Thank you for applying! We have received your application.", f, f, 0) == "applied"
-    assert classify_submission("Thanks!", f, "https://x.com/apply/confirmation", 0) == "applied"
+    # A redirect plus a bare "Thanks!" is not proof of an application; careers
+    # sites use the same words for newsletter signups and generic exits.
+    assert classify_submission("Thanks!", f, "https://x.com/apply/confirmation", 0) == "unverified"
+    assert (
+        classify_submission(
+            "Your application has been submitted. We'll be in touch.",
+            f,
+            "https://x.com/apply/confirmation",
+            0,
+        )
+        == "applied"
+    )
     assert classify_submission("Please fix the errors below", f, f, 2) == "errors"
     assert classify_submission("Apply for this job", f, f, 0) == "unverified"  # nothing changed -> not proven
     assert classify_submission("Thank you for your interest in our footer", f, f, 0) == "unverified"
+    assert classify_submission("Thank you for visiting our careers site", f, "https://x.com/thank-you", 0) == "unverified"
 
 
 # ---- location filter -----------------------------------------------------------------------------------------

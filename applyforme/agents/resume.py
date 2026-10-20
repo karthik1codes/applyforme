@@ -16,17 +16,30 @@ SYSTEM = """You tailor a candidate's resume to a specific job.
 YOU MAY: reorder roles' bullets and skills by relevance, drop the least relevant bullets, reword bullets to
 use the job's keywords WHEN the keyword truthfully describes the same work, rewrite the summary (max 3 sentences).
 YOU MAY NOT: add skills, tools, employers, titles, dates, degrees, responsibilities or numbers that are not in the
-profile. Keep every company, title, start and end EXACTLY as given. Metrics must be copied exactly."""
+profile. Keep every company, title, start and end EXACTLY as given. Metrics must be copied exactly.
+Education, projects, honors/awards, and custom sections are taken verbatim from the profile for the PDF — do not
+invent those; only return summary, skills, and experience in your JSON."""
 
 
 def _baseline(profile: Profile) -> ResumeDoc:
+    flat_skills = list(profile.skills)
+    if not flat_skills and profile.skill_categories:
+        for c in profile.skill_categories:
+            items = c.get("items") or []
+            if isinstance(items, str):
+                items = [s.strip() for s in items.split(",") if s.strip()]
+            flat_skills.extend(str(i) for i in items if i)
     return ResumeDoc(
         summary=profile.summary.strip(),
-        skills=profile.skills,
+        skills=flat_skills,
         experience=[
             ResumeRole(
-                company=e["company"], title=e["title"], start=str(e.get("start", "")), end=str(e.get("end", "")),
-                bullets=e.get("highlights", []),
+                company=e["company"],
+                title=e["title"],
+                location=str(e.get("location", "")),
+                start=str(e.get("start", "")),
+                end=str(e.get("end", "")),
+                bullets=e.get("highlights", e.get("bullets", [])),
             )
             for e in profile.experience
         ],
@@ -71,7 +84,8 @@ the SAME work is fine. Reply with verdict PASS or FAIL and list each concrete pr
 
 
 def judge_enabled() -> bool:
-    return os.getenv("APPLYFORME_JUDGE", "1") != "0"
+    # Off by default — second LLM pass roughly doubles tailor time. Set APPLYFORME_JUDGE=1 to enable.
+    return os.getenv("APPLYFORME_JUDGE", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def judge_resume(base: ResumeDoc, doc: ResumeDoc) -> list[str]:
@@ -107,7 +121,7 @@ def tailor_resume(job: Job, profile: Profile, keywords: list[str] | None = None)
 
 
 def render_html(doc: ResumeDoc, profile: Profile) -> str:
-    """Navy-blue Elegant Resume HTML (used for the PDF uploaded to application forms)."""
+    """Jake-style academic resume HTML (used for the PDF uploaded to application forms)."""
     from ..templates.elegant_resume import render_elegant_html
 
     return render_elegant_html(doc, profile)
@@ -126,7 +140,7 @@ def tex(s: object) -> str:
 
 
 def render_latex(doc: ResumeDoc, profile: Profile) -> str:
-    """Elegant Resume (Giannetti) LaTeX — navy sections, rSubsection blocks, Overleaf-ready single file."""
+    """Jake-style academic LaTeX — single-column, Times, Overleaf-ready single file."""
     from ..templates.elegant_resume import render_elegant_latex
 
     return render_elegant_latex(doc, profile)
@@ -134,15 +148,29 @@ def render_latex(doc: ResumeDoc, profile: Profile) -> str:
 
 def build_pdf(job: Job, profile: Profile, keywords: list[str] | None = None) -> tuple[str, str, list[str]]:
     """Tailor + render. Returns (pdf_path, tex_path, warnings)."""
+    import time
+
+    t0 = time.perf_counter()
+    print(f"[resume] LLM tailor…")
     doc, errs = tailor_resume(job, profile, keywords)
+    print(f"[resume] LLM done in {time.perf_counter() - t0:.1f}s" + (" (judge on)" if judge_enabled() else ""))
     stem = job.id.replace(":", "_")
     tex_path = OUTPUT_DIR / f"{stem}.resume.tex"
     tex_path.write_text(render_latex(doc, profile), encoding="utf-8")
     out = OUTPUT_DIR / f"{stem}.resume.pdf"
+    t1 = time.perf_counter()
+    print("[resume] rendering PDF via Chromium…")
     with sync_playwright() as pw:
-        b = pw.chromium.launch()
+        b = pw.chromium.launch(headless=True)
         pg = b.new_page()
-        pg.set_content(render_html(doc, profile))
-        pg.pdf(path=str(out), format="A4", margin={"top": "14mm", "bottom": "14mm", "left": "16mm", "right": "16mm"})
+        pg.set_content(render_html(doc, profile), wait_until="domcontentloaded")
+        pg.pdf(
+            path=str(out),
+            format="Letter",
+            print_background=True,
+            display_header_footer=False,
+            margin={"top": "0.5in", "bottom": "0.5in", "left": "0.55in", "right": "0.55in"},
+        )
         b.close()
+    print(f"[resume] PDF ready in {time.perf_counter() - t1:.1f}s → {out}")
     return str(out), str(tex_path), errs

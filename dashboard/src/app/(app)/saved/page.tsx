@@ -5,8 +5,8 @@ import { requireOnboarding } from "@/lib/onboarding-gate";
 import { getJob } from "@/lib/db";
 import { listSavedIds } from "@/lib/saved";
 
-export default function SavedPage() {
-  requireOnboarding();
+export default async function SavedPage() {
+  await requireOnboarding();
   const jobs = listSavedIds().map((id) => getJob(id)).filter(Boolean);
 
   return (

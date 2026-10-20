@@ -5,24 +5,33 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
-import { PLANS, currency, getBilling, stripe, syncCheckoutSession } from "@/lib/billing";
+import { PLANS, currency, dodoEnabled, getBilling, syncCheckoutReturn } from "@/lib/billing";
 
-export default async function Page({ searchParams }: { searchParams: Promise<{ checkout?: string; session_id?: string; error?: string }> }) {
+export default async function Page({
+  searchParams,
+}: {
+  searchParams: Promise<{
+    checkout?: string;
+    subscription_id?: string;
+    status?: string;
+    error?: string;
+  }>;
+}) {
   const q = await searchParams;
-  // Returning from Stripe Checkout: record the subscription right away (the webhook does the same, idempotently).
-  if (q.checkout === "success" && q.session_id) {
+  // Returning from Dodo hosted checkout: record the subscription right away (webhook does the same).
+  if (q.checkout === "success" && q.subscription_id && (q.status === "active" || q.status === "succeeded" || !q.status)) {
     try {
-      await syncCheckoutSession(q.session_id);
+      await syncCheckoutReturn(q.subscription_id);
     } catch {
       /* the webhook will catch up */
     }
   }
   const billing = getBilling();
-  const enabled = !!stripe();
+  const enabled = dodoEnabled();
   const fmt = new Intl.NumberFormat("en-US", { style: "currency", currency: currency().toUpperCase(), maximumFractionDigits: 0 });
 
   return (
-    <PageContainer title="Billing" description="Pick a plan. Payments are handled by Stripe Checkout: card details never touch this app.">
+    <PageContainer title="Billing" description="Pick a plan. Payments are handled by Dodo Payments checkout — card details never touch this app.">
       {q.checkout === "success" && (
         <Alert>
           <AlertTitle>Payment received</AlertTitle>
@@ -43,10 +52,14 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ c
       )}
       {!enabled && (
         <Alert>
-          <AlertTitle>Stripe isn&apos;t configured yet</AlertTitle>
+          <AlertTitle>Dodo Payments isn&apos;t configured yet</AlertTitle>
           <AlertDescription>
-            Add <code>STRIPE_SECRET_KEY</code> (test key: sk_test_...) to the root <code>.env</code> and restart. For automatic status updates also set{" "}
-            <code>STRIPE_WEBHOOK_SECRET</code> and run <code>stripe listen --forward-to localhost:3000/api/stripe/webhook</code>.
+            Add <code>DODO_PAYMENTS_API_KEY</code> and product ids to the root <code>.env</code> and restart. See{" "}
+            <a className="underline" href="https://docs.dodopayments.com/developer-resources/integration-guide" target="_blank" rel="noreferrer">
+              Dodo Payments docs
+            </a>
+            . For automatic status updates also set <code>DODO_PAYMENTS_WEBHOOK_KEY</code> pointing at{" "}
+            <code>/api/webhook/dodo-payments</code>.
           </AlertDescription>
         </Alert>
       )}
@@ -56,7 +69,9 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ c
           <div className="text-sm">
             Current plan: <b>{PLANS.find((p) => p.id === billing.plan)?.name}</b>{" "}
             <Badge variant="secondary">{billing.status === "none" ? "free" : billing.status}</Badge>
-            {billing.currentPeriodEnd && <span className="ml-2 text-muted-foreground">renews {new Date(billing.currentPeriodEnd).toLocaleDateString()}</span>}
+            {billing.currentPeriodEnd && (
+              <span className="ml-2 text-muted-foreground">renews {new Date(billing.currentPeriodEnd).toLocaleDateString()}</span>
+            )}
           </div>
           {billing.customerId && enabled && (
             <form action={openBillingPortal}>

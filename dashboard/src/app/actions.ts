@@ -3,10 +3,11 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { addEvent, db, questionsFor } from "@/lib/db";
-import { createCheckout, getBilling, stripe, appUrl, type PlanId } from "@/lib/billing";
+import { createCheckout, customerPortalUrl, getBilling, type PlanId } from "@/lib/billing";
+import { startPipeline } from "@/lib/pipeline-runner";
 import { newCode, setWa } from "@/lib/whatsapp";
 
-/** Save the human's answers. Once every question of a job is answered it goes back to "ready" for `apply`. */
+/** Save the human's answers. Once every question of a job is answered, resume apply automatically. */
 export async function submitAnswers(jobId: string, formData: FormData) {
   const upd = db().prepare("UPDATE questions SET answer=? WHERE id=? AND job_id=?");
   for (const q of questionsFor(jobId)) {
@@ -17,9 +18,11 @@ export async function submitAnswers(jobId: string, formData: FormData) {
   if (open === 0) {
     db().prepare("UPDATE jobs SET status='ready', notes=NULL, updated_at=? WHERE id=? AND status='needs_feedback'")
       .run(new Date().toISOString(), jobId);
-    addEvent(jobId, "answered", "You answered the open questions", "Re-run: python -m applyforme apply " + jobId);
+    addEvent(jobId, "answered", "You answered the open questions", "Agent is resuming the application.");
+    void startPipeline("apply", 1, { jobId });
   }
   revalidatePath("/", "layout");
+  if (open === 0) redirect(`/applications/${encodeURIComponent(jobId)}?applying=1`);
 }
 
 export async function skipJob(jobId: string) {
@@ -48,9 +51,7 @@ export async function startCheckout(planId: PlanId) {
 }
 
 export async function openBillingPortal() {
-  const s = stripe();
   const { customerId } = getBilling();
-  if (!s || !customerId) redirect("/billing?error=No%20Stripe%20customer%20yet");
-  const session = await s.billingPortal.sessions.create({ customer: customerId, return_url: `${appUrl()}/billing` });
-  redirect(session.url);
+  if (!customerId) redirect("/billing?error=No%20billing%20customer%20yet");
+  redirect(customerPortalUrl(customerId));
 }

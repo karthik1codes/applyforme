@@ -9,6 +9,10 @@ const nextConfig: NextConfig = {
   // Pages read a live SQLite DB on every request, so the "cacheComponents"/PPR
   // options from the starter template are intentionally not enabled.
   serverExternalPackages: ["better-sqlite3"],
+  // Quick tunnels (trycloudflare.com) hit the dev server cross-origin. Without
+  // this, Next blocks /_next assets + HMR with a bare "Unauthorized" body —
+  // cloudflared logs that as a malformed HTTP response.
+  allowedDevOrigins: ["*.trycloudflare.com"],
   images: {
     remotePatterns: [{ protocol: "https", hostname: "images.unsplash.com" }],
   },

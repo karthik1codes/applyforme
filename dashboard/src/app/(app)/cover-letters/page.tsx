@@ -1,18 +1,22 @@
 import Link from "next/link";
+import { FindJobsButton } from "@/components/find-jobs-button";
 import { PageContainer } from "@/components/page-container";
 import { requireOnboarding } from "@/lib/onboarding-gate";
 import { listJobs } from "@/lib/db";
 
-export default function CoverLettersPage() {
-  requireOnboarding();
+export default async function CoverLettersPage() {
+  await requireOnboarding();
   const withCover = listJobs({ status: ["ready", "applied", "needs_feedback", "manual"], limit: 100 }).filter((j) => j.coverLetter);
 
   return (
     <PageContainer title="Cover Letters" description="Per-job letters the tailor agent wrote. Facts are validated against your profile.">
       {withCover.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          None yet. Run <code className="rounded bg-muted px-1">python -m applyforme tailor</code> on matched jobs.
-        </p>
+        <div className="rounded-2xl border border-dashed p-8 text-center">
+          <p className="text-sm text-muted-foreground">None yet. Strong matches get a letter when we tailor your materials.</p>
+          <div className="mt-4 flex justify-center">
+            <FindJobsButton label="Find jobs to tailor" size="lg" />
+          </div>
+        </div>
       ) : (
         <ul className="space-y-4">
           {withCover.map((j) => (

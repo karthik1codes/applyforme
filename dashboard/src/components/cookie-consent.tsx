@@ -8,11 +8,17 @@ export function CookieConsent() {
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
+    let open = false;
     try {
-      if (!localStorage.getItem(KEY)) setOpen(true);
+      open = !localStorage.getItem(KEY);
     } catch {
-      setOpen(true);
+      open = true;
     }
+    if (!open) return;
+    // Defer one tick: reading localStorage is a post-mount concern, not a
+    // synchronous cascading render.
+    const t = setTimeout(() => setOpen(true), 0);
+    return () => clearTimeout(t);
   }, []);
 
   function accept() {

@@ -2,6 +2,12 @@
 # They are instructed never to invent facts that are not here.
 # Set false (or remove) to force the dashboard onboarding wizard.
 onboarding_complete: false
+# Filled by dashboard onboarding (hear-about, role, referral).
+attribution:
+  how_heard: ""          # friend | linkedin | twitter | youtube | google | college | referral | other
+  role: ""               # student | intern | professional | career_switcher | freelancer | other
+  referral_code: ""      # code the user entered
+  invite_code: ""        # their share code (auto-generated)
 personal:
   first_name: Jane
   last_name: Doe
@@ -38,6 +44,8 @@ preferences:
   # seniority_level: intern | junior | mid | senior | lead | executive
   # Junior seekers never see Senior/Staff/Principal/Lead/Director titles.
   seniority_level: mid
+  # search_focus: jobs | internships | both  (set in onboarding — drives which pipeline runs)
+  search_focus: jobs
   current_title: Software Engineer
   years_experience: 4
   target_titles: [Backend Engineer, Software Engineer, Data Engineer]
@@ -47,7 +55,7 @@ preferences:
   reject_locations: [US, USA, United States, Canada, UK, Europe]
   remote_only: false
   min_match_score: 70            # 0-100, jobs below are skipped
-  exclude_keywords: [intern]     # seniority filter adds senior/staff/... automatically when junior
+  exclude_keywords: [intern]     # omit when search_focus is internships or both
 
 # Answers to common screening questions (used verbatim when asked)
 screening:
@@ -73,17 +81,26 @@ compensation:
   salary_range_min: ""
   salary_range_max: ""
 
-# Optional: search job boards too (needs `pip install python-jobspy`).
-# Their terms restrict scraping (LinkedIn especially) - keep it small. Aggregator-only
-# listings are collected/scored/tailored but you apply to them manually via the link.
-# searches:
-#   - term: backend engineer
-#     location: Bengaluru, India
-#     sites: [indeed, google]
-#     results_wanted: 25
-#     hours_old: 72
+# Job boards — always searched on every discover/run (Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google).
+# One entry per target title. If you omit `searches`, discovery builds them from preferences.target_titles.
+searches:
+  - term: Backend Engineer
+    location: Bengaluru, India
+    sites: [indeed, linkedin, glassdoor, zip_recruiter, google]
+    results_wanted: 25
+    hours_old: 72
+  - term: Software Engineer
+    location: Bengaluru, India
+    sites: [indeed, linkedin, glassdoor, zip_recruiter, google]
+    results_wanted: 25
+    hours_old: 72
+  - term: Data Engineer
+    location: Bengaluru, India
+    sites: [indeed, linkedin, glassdoor, zip_recruiter, google]
+    results_wanted: 25
+    hours_old: 72
 
-# Companies to watch: board slug on each ATS
+# Companies to watch: board slug on each ATS (Greenhouse / Lever / Ashby) + Workday
 sources:
   greenhouse: [stripe, airbnb]
   lever: [spotify]

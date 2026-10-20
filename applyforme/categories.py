@@ -5,6 +5,7 @@ import re
 
 # Order matters: first match wins, so specific buckets come before generic ones.
 RULES: list[tuple[str, str]] = [
+    ("Internship", r"\b(intern|internship|trainee|apprentice|co-?op)\b"),
     ("Engineering Management", r"\b(engineering manager|head of engineering|director of engineering|vp engineering|tech lead manager)\b"),
     ("Machine Learning / AI", r"\b(machine learning|ml\b|ai\b|applied scientist|research (scientist|engineer)|llm|nlp|computer vision|deep learning)"),
     ("Data", r"\b(data (engineer|scientist|analyst|platform|infrastructure)|analytics|etl|bi\b|business intelligence|database)"),

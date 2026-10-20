@@ -1,19 +1,31 @@
-"""Christian Maria Giannetti's Elegant Resume layout (CC BY 4.0), as a self-contained .tex.
+"""Jake-style academic resume (single-column, Times, black rules) as self-contained .tex / HTML.
 
-The Overleaf "Open" button can only ship one snip, so the class macros are inlined —
-no separate resume.cls required. Visual contract: navy blue (#00367B) headings,
-tagged personal info, rSection / rSubsection blocks, tabular skills.
+Matches the dashboard resume editor preview/export. No browser print chrome in the PDF itself
+(\\pagestyle{empty}); users should also disable Headers & footers when printing HTML.
 """
 from __future__ import annotations
 
+import re
+
 from ..models import Profile, ResumeDoc
 
-NAVY = "0,54,123"  # RGB used by the original template
-
 _TEX_ESC = {
-    "\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$", "#": r"\#", "_": r"\_",
-    "{": r"\{", "}": r"\}", "~": r"\textasciitilde{}", "^": r"\textasciicircum{}",
-    "\u2013": "--", "\u2014": "---", "\u2018": "'", "\u2019": "'", "\u201c": "``", "\u201d": "''",
+    "\\": r"\textbackslash{}",
+    "&": r"\&",
+    "%": r"\%",
+    "$": r"\$",
+    "#": r"\#",
+    "_": r"\_",
+    "{": r"\{",
+    "}": r"\}",
+    "~": r"\textasciitilde{}",
+    "^": r"\textasciicircum{}",
+    "\u2013": "--",
+    "\u2014": "---",
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": "``",
+    "\u201d": "''",
 }
 
 
@@ -33,220 +45,356 @@ def _date_range(start: str, end: str) -> str:
     return _tex(s or e)
 
 
+def _bold_lead_bullet(raw: str) -> str:
+    """Lead: rest → \\textbf{Lead:} rest (for LaTeX items)."""
+    m = re.match(r"^([^:—\-]{2,48})\s*[:—\-]\s+(.+)$", raw.strip())
+    if m:
+        return rf"\textbf{{{_tex(m.group(1).strip())}:}} {_tex(m.group(2))}"
+    return _tex(raw)
+
+
+def _skill_lines(profile: Profile, doc: ResumeDoc) -> list[str]:
+    cats = getattr(profile, "skill_categories", None) or []
+    lines: list[str] = []
+    for c in cats:
+        label = str(c.get("label") or c.get("name") or "").strip()
+        items = c.get("items")
+        if isinstance(items, list):
+            items_s = ", ".join(str(i) for i in items if i)
+        else:
+            items_s = str(items or "").strip()
+        if label or items_s:
+            lines.append(f"{label}: {items_s}" if label else items_s)
+    if not lines and doc.skills:
+        lines.append("Skills: " + ", ".join(doc.skills))
+    return lines
+
+
+def _contact_tex(profile: Profile) -> str:
+    p = profile.personal
+    parts: list[str] = []
+    if p.get("email"):
+        parts.append(_href("mailto:" + p["email"], p["email"]))
+    if p.get("phone"):
+        parts.append(_tex(p["phone"]))
+    website = p.get("website") or p.get("portfolio")
+    if website:
+        label = (profile.resume or {}).get("portfolio_label") or "Portfolio"
+        parts.append(_href(website, str(label)))
+    if p.get("github"):
+        parts.append(_href(p["github"], "GitHub"))
+    if p.get("linkedin"):
+        parts.append(_href(p["linkedin"], "LinkedIn"))
+    if p.get("twitter"):
+        parts.append(_href(p["twitter"], "Twitter"))
+    return r" $|$ ".join(parts)
+
+
 def render_elegant_latex(doc: ResumeDoc, profile: Profile) -> str:
     p = profile.personal
     name = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip()
+    contact = _contact_tex(profile)
 
-    info_rows: list[str] = []
-    if p.get("location"):
-        info_rows.append(rf"  \personalInfo{{\tag{{Location}}\info{{{_tex(p['location'])}}}}}")
-    contact_bits: list[str] = []
-    if p.get("email"):
-        contact_bits.append(rf"\tag{{E-mail}}\info{{{_href('mailto:' + p['email'], p['email'])}}}")
-    if p.get("phone"):
-        contact_bits.append(rf"\tag{{Telephone}}\info{{{_tex(p['phone'])}}}")
-    if contact_bits:
-        info_rows.append(r"  \personalInfo{" + r" \infoSeparator ".join(contact_bits) + "}")
-    link_bits: list[str] = []
-    for key, label in (("linkedin", "LinkedIn"), ("github", "GitHub"), ("website", "Website")):
-        if p.get(key):
-            short = p[key].replace("https://", "").replace("http://", "")
-            link_bits.append(rf"\tag{{{label}}}\info{{{_href(p[key], short)}}}")
-    if link_bits:
-        info_rows.append(r"  \personalInfo{" + r" \infoSeparator ".join(link_bits) + "}")
-    personal_block = "\n".join(info_rows) if info_rows else r"  \personalInfo{\tag{Contact}\info{See profile}}"
+    show_summary = bool((profile.resume or {}).get("show_summary")) and bool(doc.summary.strip())
+    summary_tex = ""
+    if show_summary:
+        summary_tex = rf"""
+\resumeSection{{Professional Summary}}
+{_tex(doc.summary)}
+"""
 
     edu_blocks: list[str] = []
     for x in profile.education:
-        degree = str(x.get("degree") or "Degree")
         school = str(x.get("school") or "")
-        year = str(x.get("year") or "")
-        program = str(x.get("program") or x.get("field") or "Degree program")
-        notes = [n for n in (x.get("notes"), x.get("highlights") if isinstance(x.get("highlights"), str) else None) if n]
-        if isinstance(x.get("highlights"), list):
-            notes.extend(str(h) for h in x["highlights"])
-        items = "\n".join(rf"        \italicitem{{{_tex(n)}}}" for n in notes) or rf"        \plainitem{{{_tex(school)}}}"
+        location = str(x.get("location") or "")
+        degree = str(x.get("degree") or "")
+        details = str(x.get("details") or x.get("gpa") or x.get("program") or x.get("field") or "")
+        dates = str(x.get("dates") or x.get("year") or "")
+        degree_line = "; ".join(t for t in (degree, details) if t)
         edu_blocks.append(
-            rf"""    \begin{{rSubsectionNoBullet}}{{\bf {_tex(degree)}}}{{{_tex(school)}}}{{{_tex(program)}}}{{{_tex(year)}}}
-{items}
-    \end{{rSubsectionNoBullet}}"""
+            rf"""\resumeSubheading{{{_tex(school)}}}{{{_tex(location)}}}{{{_tex(degree_line)}}}{{{_tex(dates)}}}"""
         )
-    education = "\n\n".join(edu_blocks) if edu_blocks else "    \\plainitem{See profile}"
+    education = "\n".join(edu_blocks)
 
+    skill_items = "\n".join(
+        rf"  \item \textbf{{{_tex(line.split(':', 1)[0].strip())}:}} {_tex(line.split(':', 1)[1].strip())}"
+        if ":" in line
+        else rf"  \item {_tex(line)}"
+        for line in _skill_lines(profile, doc)
+    )
+
+    # Prefer tailored roles; fill location from profile experience when missing
+    loc_by_company = {
+        str(x.get("company") or ""): str(x.get("location") or "")
+        for x in (profile.experience or [])
+    }
     exp_blocks: list[str] = []
     for r in doc.experience:
-        bullets = "\n".join(rf"        \item {_tex(b)}" for b in r.bullets) or r"        \item "
+        loc = (r.location or loc_by_company.get(r.company, "")).strip()
+        bullets = "\n".join(rf"    \item {_bold_lead_bullet(b)}" for b in r.bullets) or r"    \item "
         exp_blocks.append(
-            rf"""    \begin{{rSubsection}}{{{_tex(r.company)}}}{{{_date_range(r.start, r.end)}}}{{{_tex(r.title)}}}{{}}
+            rf"""\resumeSubheading{{{_tex(r.company)}}}{{{_tex(loc)}}}{{{_tex(r.title)}}}{{{_date_range(r.start, r.end)}}}
+  \resumeItemListStart
 {bullets}
-    \end{{rSubsection}}"""
+  \resumeItemListEnd"""
         )
     experience = "\n\n".join(exp_blocks)
 
-    skills_entry = rf"    \entry{{Programming Languages/Tools}}{{{_tex(', '.join(doc.skills))}}}"
-    summary_section = ""
-    if doc.summary.strip():
-        summary_section = rf"""
-\begin{{rSection}}{{Professional summary}}
-{_tex(doc.summary)}
-\end{{rSection}}
-"""
+    proj_blocks: list[str] = []
+    for x in getattr(profile, "projects", None) or []:
+        pname = str(x.get("name") or x.get("title") or "").strip()
+        if not pname:
+            continue
+        tagline = str(x.get("tagline") or x.get("description") or "").strip()
+        links = str(x.get("links") or "").strip()
+        title = f"{pname} -- {tagline}" if tagline else pname
+        bullets_raw = x.get("bullets") or x.get("highlights") or []
+        if isinstance(bullets_raw, str):
+            bullets_raw = [bullets_raw]
+        bullets = "\n".join(rf"    \item {_bold_lead_bullet(str(b))}" for b in bullets_raw if str(b).strip())
+        proj_blocks.append(
+            rf"""\resumeProjectHeading{{\textbf{{{_tex(title)}}}}}{{{_tex(links)}}}
+  \resumeItemListStart
+{bullets or r'    \item '}
+  \resumeItemListEnd"""
+        )
+    projects = "\n\n".join(proj_blocks)
 
-    return rf"""% Generated by applyforme — Elegant Resume layout (Christian Maria Giannetti, CC BY 4.0).
-% Self-contained: macros from resume.cls are inlined so Overleaf / pdfLaTeX need no extra files.
-% Navy blue primary colour for a formal institutional tone.
-\documentclass[11pt,a4paper]{{article}}
-\usepackage[left=0.75in,top=0.6in,right=0.75in,bottom=0.6in]{{geometry}}
+    honors = getattr(profile, "honors", None) or []
+    honors_tex = "\n".join(rf"  \item {_tex(h)}" for h in honors if str(h).strip())
+
+    custom_tex_parts: list[str] = []
+    for s in getattr(profile, "custom_sections", None) or []:
+        title = str(s.get("title") or "").strip()
+        if not title:
+            continue
+        bullets_raw = s.get("bullets") or s.get("items") or []
+        if isinstance(bullets_raw, str):
+            bullets_raw = [bullets_raw]
+        items = "\n".join(rf"  \item {_bold_lead_bullet(str(b))}" for b in bullets_raw if str(b).strip())
+        custom_tex_parts.append(
+            rf"""
+\resumeSection{{{_tex(title)}}}
+\begin{{itemize}}[leftmargin=1.15em,itemsep=1pt,topsep=2pt,parsep=0pt]
+{items}
+\end{{itemize}}
+"""
+        )
+
+    return rf"""% Generated by applyforme — Jake-style academic resume (single-column).
+\documentclass[10pt,letterpaper]{{article}}
+\usepackage[left=0.55in,top=0.45in,right=0.55in,bottom=0.45in]{{geometry}}
 \usepackage[T1]{{fontenc}}
+\usepackage{{mathptmx}}
 \usepackage{{xcolor}}
 \usepackage[hidelinks]{{hyperref}}
-\usepackage{{changepage}}
-\usepackage{{tabularx}}
 \usepackage{{enumitem}}
-\usepackage{{array}}
 \pagestyle{{empty}}
 \setlength{{\parindent}}{{0pt}}
 \setlength{{\parskip}}{{0pt}}
-\definecolor{{navyblue}}{{RGB}}{{{NAVY}}}
+\setlist[itemize]{{leftmargin=1.15em,itemsep=1pt,topsep=2pt,parsep=0pt}}
 
-% ---- resume.cls-compatible macros (inlined) --------------------------------
-\newcommand{{\sectionlineskip}}{{\vspace{{2pt}}}}
-\newcommand{{\sectionskip}}{{\vspace{{8pt}}}}
-\newenvironment{{rSection}}[1]{{%
-  \sectionskip
-  {{\color{{navyblue}}\MakeUppercase{{\bfseries #1}}}}%
-  \sectionlineskip
-  {{\color{{navyblue}}\hrule height 0.6pt}}%
+\newcommand{{\resumeSection}}[1]{{%
+  \vspace{{8pt}}%
+  {{\scshape\bfseries\large #1}}\\[-2pt]%
+  \hrule height 0.6pt%
   \vspace{{4pt}}%
-  \begin{{list}}{{}}{{%
-    \setlength{{\leftmargin}}{{0em}}%
-    \setlength{{\labelwidth}}{{0em}}%
-    \setlength{{\labelsep}}{{0em}}%
-    \setlength{{\itemsep}}{{4pt}}%
-    \setlength{{\parsep}}{{0pt}}%
-    \setlength{{\topsep}}{{0pt}}%
-  }}%
-  \item\relax
-}}{{%
-  \end{{list}}%
 }}
-% Work: #1 company, #2 dates, #3 title, #4 location
-\newenvironment{{rSubsection}}[4]{{%
-  \textbf{{#1}} \hfill {{\small #2}}\\[-1pt]
-  {{\em #3}} \hfill {{\small #4}}%
-  \vspace{{-2pt}}%
-  \begin{{itemize}}[leftmargin=1.2em,itemsep=1pt,topsep=2pt,parsep=0pt]
-}}{{%
-  \end{{itemize}}%
+\newcommand{{\resumeSubheading}}[4]{{
+  \vspace{{1pt}}\textbf{{#1}} \hfill #2\\
+  \textit{{#3}} \hfill #4\vspace{{-2pt}}
 }}
-% Education: #1 degree, #2 school, #3 program, #4 dates
-\newenvironment{{rSubsectionNoBullet}}[4]{{%
-  \textbf{{#1}} \hfill {{\small #4}}\\[-1pt]
-  {{\em #2}} \hfill {{\small #3}}%
-  \vspace{{1pt}}%
-  \begin{{itemize}}[leftmargin=1.2em,itemsep=1pt,topsep=1pt,parsep=0pt]
-}}{{%
-  \end{{itemize}}%
+\newcommand{{\resumeProjectHeading}}[2]{{
+  \vspace{{1pt}}#1 \hfill #2\vspace{{-2pt}}
 }}
-\newcommand{{\italicitem}}[1]{{\item{{\textit{{#1}}}}}}
-\newcommand{{\bolditem}}[1]{{\item{{\textbf{{#1}}}}}}
-\newcommand{{\plainitem}}[1]{{\item{{#1}}}}
-\newcommand{{\link}}[2]{{\href{{#1}}{{#2}}}}
-\newcommand{{\entry}}[2]{{#1 & #2 \tabularnewline}}
-\newcommand{{\tableEnv}}[2]{{%
-  \begin{{rSection}}{{#1}}%
-    \begin{{adjustwidth}}{{0.0in}}{{0.1in}}%
-      \begin{{tabularx}}{{\linewidth}}{{@{{}} >{{\bfseries}}l @{{\hspace{{6ex}}}} X @{{}}}}%
-        #2%
-      \end{{tabularx}}%
-    \end{{adjustwidth}}%
-  \end{{rSection}}%
-}}
-\newcommand{{\tag}}[1]{{\textcolor{{navyblue}}{{\small\bfseries #1:}}\nobreakspace}}
-\newcommand{{\info}}[1]{{#1}}
-\newcommand{{\infoSeparator}}{{\hspace{{1.25em}}}}
-\newcommand{{\personalInfo}}[1]{{#1\\[2pt]}}
-\newcommand{{\printPersonalInfo}}[1]{{%
-  \vspace{{2pt}}%
-  \begin{{center}}{{\small #1}}\end{{center}}%
-  \vspace{{2pt}}%
-}}
+\newcommand{{\resumeItemListStart}}{{\begin{{itemize}}}}
+\newcommand{{\resumeItemListEnd}}{{\end{{itemize}}\vspace{{-4pt}}}}
 
 \begin{{document}}
 
 \begin{{center}}
-  {{\LARGE\bfseries\color{{navyblue}} {_tex(name)}}}
+  {{\Huge\bfseries {_tex(name)}}}\\[4pt]
+  {{\small {contact}}}
 \end{{center}}
+{summary_tex}
+\resumeSection{{Education}}
+{education or r'\textit{See profile}'}
 
-\printPersonalInfo{{
-{personal_block}
-}}
-{summary_section}
-\begin{{rSection}}{{Education}}
-{education}
-\end{{rSection}}
+\resumeSection{{Skills}}
+\begin{{itemize}}
+{skill_items or r'  \item See profile'}
+\end{{itemize}}
 
-\begin{{rSection}}{{Work experience}}
+\resumeSection{{Experience}}
 {experience}
-\end{{rSection}}
 
-\tableEnv{{Technical skills}}{{
-{skills_entry}
-}}
-
-\end{{document}}
+""" + (
+        rf"""
+\resumeSection{{Projects}}
+{projects}
+"""
+        if projects
+        else ""
+    ) + (
+        rf"""
+\resumeSection{{Honors and Awards}}
+\begin{{itemize}}
+{honors_tex}
+\end{{itemize}}
+"""
+        if honors_tex
+        else ""
+    ) + "".join(custom_tex_parts) + r"""
+\end{document}
 """
 
 
 def render_elegant_html(doc: ResumeDoc, profile: Profile) -> str:
-    """PDF twin of the Elegant Resume — navy section rules, institutional tone."""
+    """HTML twin of the Jake-style resume (print: disable browser Headers & footers)."""
     import html as H
 
     p, e = profile.personal, H.escape
     name = e(f"{p.get('first_name', '')} {p.get('last_name', '')}".strip())
-    tags = []
-    if p.get("location"):
-        tags.append(f"<span><b>Location:</b> {e(p['location'])}</span>")
-    if p.get("email"):
-        tags.append(f"<span><b>E-mail:</b> {e(p['email'])}</span>")
-    if p.get("phone"):
-        tags.append(f"<span><b>Telephone:</b> {e(p['phone'])}</span>")
-    for k, label in (("linkedin", "LinkedIn"), ("github", "GitHub"), ("website", "Website")):
-        if p.get(k):
-            tags.append(f"<span><b>{label}:</b> {e(p[k])}</span>")
 
-    edu = "".join(
-        f"<div class='job'><div class='row'><strong>{e(str(x.get('degree', '')))}</strong>"
-        f"<span class='meta'>{e(str(x.get('year', '')))}</span></div>"
-        f"<div class='row'><em>{e(str(x.get('school', '')))}</em>"
-        f"<span class='meta'>{e(str(x.get('program') or x.get('field') or ''))}</span></div></div>"
-        for x in profile.education
+    contact_parts: list[str] = []
+    if p.get("email"):
+        contact_parts.append(e(p["email"]))
+    if p.get("phone"):
+        contact_parts.append(e(p["phone"]))
+    website = p.get("website") or p.get("portfolio")
+    if website:
+        label = e(str((profile.resume or {}).get("portfolio_label") or "Portfolio"))
+        contact_parts.append(f'<a href="{e(website)}">{label}</a>')
+    if p.get("github"):
+        contact_parts.append(f'<a href="{e(p["github"])}">GitHub</a>')
+    if p.get("linkedin"):
+        contact_parts.append(f'<a href="{e(p["linkedin"])}">LinkedIn</a>')
+    if p.get("twitter"):
+        contact_parts.append(f'<a href="{e(p["twitter"])}">Twitter</a>')
+    contact = ' <span class="sep">|</span> '.join(contact_parts)
+
+    def fmt_bullet(raw: str) -> str:
+        m = re.match(r"^([^:—\-]{2,48})\s*[:—\-]\s+(.+)$", raw.strip())
+        if m:
+            return f"<strong>{e(m.group(1).strip())}:</strong> {e(m.group(2))}"
+        return e(raw)
+
+    edu = ""
+    for x in profile.education:
+        school = e(str(x.get("school") or ""))
+        location = e(str(x.get("location") or ""))
+        degree = str(x.get("degree") or "")
+        details = str(x.get("details") or x.get("gpa") or x.get("program") or x.get("field") or "")
+        dates = e(str(x.get("dates") or x.get("year") or ""))
+        degree_line = e("; ".join(t for t in (degree, details) if t))
+        edu += (
+            f"<div class='block'><div class='row'><strong>{school}</strong><span>{location}</span></div>"
+            f"<div class='row'><em>{degree_line}</em><span>{dates}</span></div></div>"
+        )
+
+    skills = "".join(
+        f"<li><strong>{e(line.split(':', 1)[0].strip())}:</strong> {e(line.split(':', 1)[1].strip())}</li>"
+        if ":" in line
+        else f"<li>{e(line)}</li>"
+        for line in _skill_lines(profile, doc)
     )
-    roles = "".join(
-        f"<div class='job'><div class='row'><strong>{e(r.company)}</strong>"
-        f"<span class='meta'>{e(r.start)} – {e(r.end)}</span></div>"
-        f"<div class='row'><em>{e(r.title)}</em><span></span></div>"
-        f"<ul>{''.join(f'<li>{e(b)}</li>' for b in r.bullets)}</ul></div>"
-        for r in doc.experience
+
+    loc_by_company = {
+        str(x.get("company") or ""): str(x.get("location") or "")
+        for x in (profile.experience or [])
+    }
+    roles = ""
+    for r in doc.experience:
+        loc = e((r.location or loc_by_company.get(r.company, "")).strip())
+        dates = e(" – ".join(t for t in (r.start, r.end) if t))
+        bullets = "".join(f"<li>{fmt_bullet(b)}</li>" for b in r.bullets if b.strip())
+        roles += (
+            f"<div class='block'><div class='row'><strong>{e(r.company)}</strong><span>{loc}</span></div>"
+            f"<div class='row'><em>{e(r.title)}</em><span>{dates}</span></div>"
+            f"<ul>{bullets}</ul></div>"
+        )
+
+    projects = ""
+    for x in getattr(profile, "projects", None) or []:
+        pname = str(x.get("name") or x.get("title") or "").strip()
+        if not pname:
+            continue
+        tagline = str(x.get("tagline") or "").strip()
+        title = e(f"{pname} – {tagline}" if tagline else pname)
+        links = e(str(x.get("links") or ""))
+        bullets_raw = x.get("bullets") or x.get("highlights") or []
+        if isinstance(bullets_raw, str):
+            bullets_raw = [bullets_raw]
+        bullets = "".join(f"<li>{fmt_bullet(str(b))}</li>" for b in bullets_raw if str(b).strip())
+        projects += (
+            f"<div class='block'><div class='row'><strong>{title}</strong><span>{links}</span></div>"
+            f"<ul>{bullets}</ul></div>"
+        )
+
+    honors = getattr(profile, "honors", None) or []
+    honors_html = "".join(f"<li>{e(str(h))}</li>" for h in honors if str(h).strip())
+
+    custom = ""
+    for s in getattr(profile, "custom_sections", None) or []:
+        title = str(s.get("title") or "").strip()
+        if not title:
+            continue
+        bullets_raw = s.get("bullets") or s.get("items") or []
+        if isinstance(bullets_raw, str):
+            bullets_raw = [bullets_raw]
+        items = "".join(f"<li>{fmt_bullet(str(b))}</li>" for b in bullets_raw if str(b).strip())
+        custom += f"<div class='section'><h2>{e(title.upper())}</h2><ul>{items}</ul></div>"
+
+    show_summary = bool((profile.resume or {}).get("show_summary")) and bool(doc.summary.strip())
+    summary = (
+        f"<div class='section'><h2>PROFESSIONAL SUMMARY</h2><p>{e(doc.summary)}</p></div>"
+        if show_summary
+        else ""
     )
-    return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-@page {{ margin: 0.6in 0.75in; }}
-body {{ font-family: "Times New Roman", Times, Georgia, serif; font-size: 10.5pt; color: #111; margin: 0; }}
-h1 {{ color: #00367B; font-size: 20pt; text-align: center; margin: 0 0 8px; font-weight: 700; }}
-.contact {{ text-align: center; font-size: 9.5pt; margin-bottom: 10px; color: #222; }}
-.contact span {{ margin: 0 10px; }} .contact b {{ color: #00367B; }}
-h2 {{ color: #00367B; font-size: 11pt; text-transform: uppercase; letter-spacing: 0.04em;
-     border-bottom: 1.5px solid #00367B; margin: 14px 0 6px; padding-bottom: 2px; }}
-.job {{ margin: 6px 0 8px; }} .row {{ display: flex; justify-content: space-between; gap: 12px; }}
-.meta {{ white-space: nowrap; font-size: 9.5pt; }} em {{ font-style: italic; }}
-ul {{ margin: 2px 0 0 1.2em; padding: 0; }} li {{ margin: 1px 0; }}
-.skills b {{ display: inline-block; min-width: 12em; }}
-</style></head><body>
-<h1>{name}</h1>
-<div class="contact">{"".join(tags)}</div>
-{f'<h2>Professional summary</h2><p>{e(doc.summary)}</p>' if doc.summary.strip() else ''}
-<h2>Education</h2>{edu or '<p>—</p>'}
-<h2>Work experience</h2>{roles}
-<h2>Technical skills</h2>
-<p class="skills"><b>Programming Languages/Tools</b> {e(', '.join(doc.skills))}</p>
+
+    return f"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<title>&#8203;</title>
+<style>
+@page {{ size: letter; margin: 0.5in 0.6in; }}
+* {{ box-sizing: border-box; }}
+html, body {{
+  margin: 0; padding: 0;
+  font-family: "Times New Roman", Times, "Liberation Serif", Georgia, serif;
+  font-size: 10.5pt; color: #000; background: #fff; line-height: 1.25;
+}}
+@media print {{
+  a {{ color: #000; text-decoration: none; }}
+}}
+.page {{ max-width: 8in; margin: 0 auto; }}
+h1 {{ text-align: center; font-size: 22pt; font-weight: 700; margin: 0 0 4px; }}
+.contact {{ text-align: center; font-size: 10pt; margin: 0 0 10px; }}
+.contact a {{ color: #000; text-decoration: underline; }}
+.contact .sep {{ margin: 0 0.35em; }}
+.section {{ margin-top: 8px; }}
+.section h2, h2 {{
+  font-size: 11pt; font-weight: 700; letter-spacing: 0.03em;
+  margin: 8px 0 4px; padding-bottom: 1px;
+  border-bottom: 1px solid #000; text-transform: uppercase;
+}}
+.block {{ margin: 4px 0 6px; }}
+.row {{ display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }}
+.row span {{ white-space: nowrap; font-size: 10pt; }}
+ul {{ margin: 2px 0 0 1.15em; padding: 0; }}
+li {{ margin: 1px 0; }}
+p {{ margin: 2px 0; }}
+</style></head>
+<body><div class="page">
+  <h1>{name}</h1>
+  <div class="contact">{contact}</div>
+  {summary}
+  <div class="section"><h2>EDUCATION</h2>{edu or '<p>—</p>'}</div>
+  <div class="section"><h2>SKILLS</h2><ul>{skills}</ul></div>
+  <div class="section"><h2>EXPERIENCE</h2>{roles}</div>
+  {f'<div class="section"><h2>PROJECTS</h2>{projects}</div>' if projects else ''}
+  {f'<div class="section"><h2>HONORS AND AWARDS</h2><ul>{honors_html}</ul></div>' if honors_html else ''}
+  {custom}
+</div>
+<script>try {{ document.title = "\\u200b"; }} catch (err) {{}}</script>
 </body></html>"""

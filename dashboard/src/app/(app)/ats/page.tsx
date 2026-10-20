@@ -1,11 +1,12 @@
 import Link from "next/link";
+import { FindJobsButton } from "@/components/find-jobs-button";
 import { PageContainer } from "@/components/page-container";
 import { requireOnboarding } from "@/lib/onboarding-gate";
 import { listJobs } from "@/lib/db";
 import { targetLabel } from "@/lib/profile";
 
-export default function AtsPage() {
-  requireOnboarding();
+export default async function AtsPage() {
+  await requireOnboarding();
   const scored = listJobs({ status: ["matched", "ready", "applied", "skipped", "failed"], order: "score", limit: 100 })
     .filter((j) => j.score != null);
 
@@ -15,9 +16,12 @@ export default function AtsPage() {
       description={`Match scores (0–100) against your profile for ${targetLabel()}. Keywords the scorer extracted feed resume tailoring.`}
     >
       {scored.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          No scores yet. Run <code className="rounded bg-muted px-1">python -m applyforme match</code> after discover.
-        </p>
+        <div className="rounded-2xl border border-dashed p-8 text-center">
+          <p className="text-sm text-muted-foreground">No scores yet. Find jobs and we&apos;ll score them against your profile.</p>
+          <div className="mt-4 flex justify-center">
+            <FindJobsButton label="Find & score jobs" size="lg" />
+          </div>
+        </div>
       ) : (
         <div className="overflow-x-auto rounded-lg border">
           <table className="w-full text-sm">

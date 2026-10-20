@@ -1,76 +1,55 @@
 import { NextResponse } from "next/server";
+import { getPipelineStatus, laneForStage, listRunningPipelines, startPipeline } from "@/lib/pipeline-runner";
+import { auth, authDisabled } from "@/auth";
 
 /**
- * Public entrypoint for EventBridge / external cron → worker on the same EC2 box.
- *
- *   POST /api/pipeline/webhook
- *   Authorization: Bearer $PIPELINE_WEBHOOK_SECRET
- *   Body: { "stage": "run"|"discover"|"match"|"tailor"|"inbox"|"apply", "limit"?: 40, "async"?: true }
- *
- * Forwards to PIPELINE_WORKER_URL (default http://127.0.0.1:8787/hooks/<stage>).
+ * Frontend + EventBridge entrypoint.
+ * Auth: Bearer PIPELINE_WEBHOOK_SECRET, or a signed-in session (dashboard buttons).
+ * Jobs and internships use separate lanes and can run in parallel.
  */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const WORKER = () => (process.env.PIPELINE_WORKER_URL || "http://127.0.0.1:8787").replace(/\/$/, "");
-
-function authorized(req: Request): boolean {
+async function authorized(req: Request): Promise<boolean> {
   const secret = process.env.PIPELINE_WEBHOOK_SECRET || "";
-  if (!secret) return false;
-  const auth = req.headers.get("authorization") || "";
-  if (auth === `Bearer ${secret}`) return true;
-  return req.headers.get("x-pipeline-secret") === secret;
+  const authz = req.headers.get("authorization") || "";
+  if (secret && authz === `Bearer ${secret}`) return true;
+  if (secret && req.headers.get("x-pipeline-secret") === secret) return true;
+  if (authDisabled()) return true;
+  const session = await auth();
+  return !!session?.user;
 }
 
 export async function GET() {
-  try {
-    const r = await fetch(`${WORKER()}/health`, { cache: "no-store" });
-    const body = await r.json();
-    return NextResponse.json({ proxy: "ok", worker: body });
-  } catch (e) {
-    return NextResponse.json(
-      { proxy: "ok", worker: null, error: e instanceof Error ? e.message : "worker unreachable" },
-      { status: 503 },
-    );
-  }
+  return NextResponse.json({
+    proxy: "ok",
+    running: listRunningPipelines(),
+    lanes: {
+      jobs: getPipelineStatus("jobs"),
+      internships: getPipelineStatus("internships"),
+      apply: getPipelineStatus("apply"),
+      inbox: getPipelineStatus("inbox"),
+    },
+  });
 }
 
 export async function POST(req: Request) {
-  if (!process.env.PIPELINE_WEBHOOK_SECRET) {
-    return NextResponse.json({ error: "PIPELINE_WEBHOOK_SECRET not configured" }, { status: 503 });
-  }
-  if (!authorized(req)) {
+  if (!(await authorized(req))) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  let body: { stage?: string; limit?: number; async?: boolean } = {};
+  let body: { stage?: string; limit?: number; job_id?: string; jobId?: string } = {};
   try {
     body = (await req.json()) as typeof body;
   } catch {
     body = {};
   }
   const stage = (body.stage || "run").replace(/[^a-z]/g, "");
-  const allowed = new Set(["run", "discover", "enrich", "match", "tailor", "inbox", "apply"]);
-  if (!allowed.has(stage)) {
-    return NextResponse.json({ error: `unknown stage`, allowed: [...allowed] }, { status: 400 });
-  }
-
-  const secret = process.env.PIPELINE_WEBHOOK_SECRET!;
-  try {
-    const r = await fetch(`${WORKER()}/hooks/${stage}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${secret}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ limit: body.limit, async: body.async ?? true }),
-    });
-    const data = await r.json().catch(() => ({}));
-    return NextResponse.json(data, { status: r.status });
-  } catch (e) {
-    return NextResponse.json(
-      { error: "worker unreachable — is `python -m applyforme serve` running?", detail: e instanceof Error ? e.message : String(e) },
-      { status: 502 },
-    );
-  }
+  const jobId = body.job_id || body.jobId;
+  const lane = laneForStage(stage);
+  const result = await startPipeline(stage, body.limit ?? 40, jobId ? { jobId } : undefined);
+  return NextResponse.json(
+    { accepted: result.ok, stage, lane, message: result.message, pipeline: getPipelineStatus(lane) },
+    { status: result.ok ? 202 : 409 },
+  );
 }
