@@ -131,6 +131,31 @@ def test_apply_preflight_honours_a_cancel_request(tmp_path):
     assert not store.is_apply_cancelled(job.id)
 
 
+def test_retry_after_auth_does_not_jump_back_to_profile_ready(tmp_path):
+    from applyforme.agents.applier import _mark_profile_ready
+
+    store = make_store(tmp_path)
+    first = ApplyStateMachine(store, "job-retry-auth")
+    first.start()
+    first.transition(ApplyState.PROFILE_READY)
+    first.transition(ApplyState.BROWSER_INITIALIZED)
+    first.transition(ApplyState.AUTHENTICATION_REQUIRED)
+
+    retry = ApplyStateMachine(store, "job-retry-auth")
+    retry.resume()
+    assert retry.state is ApplyState.BROWSER_INITIALIZED
+
+    # The old code called PROFILE_READY here, which is not a legal edge from
+    # BROWSER_INITIALIZED and made every retry after a LinkedIn login wall fail.
+    _mark_profile_ready(retry, "resume.pdf")
+    assert retry.state is ApplyState.BROWSER_INITIALIZED
+
+    fresh = ApplyStateMachine(None, "job-fresh")
+    fresh.start()
+    _mark_profile_ready(fresh, "resume.pdf")
+    assert fresh.state is ApplyState.PROFILE_READY
+
+
 def test_linkedin_postings_keep_the_linkedin_target():
     job = Job(
         id="linkedin:1",

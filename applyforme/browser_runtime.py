@@ -19,11 +19,18 @@ APPLY_USER_DATA = DATA_DIR / "browser"
 def _chrome_exe_under(root: Path) -> Path | None:
     if not root.is_dir():
         return None
-    # Prefer newest chromium-* folder that contains chrome.exe
+    # Playwright lays out the full browser differently per OS. Check all of
+    # them so a Linux worker does not "fix" a perfectly good cache path.
+    names = (
+        "chrome-win64/chrome.exe",
+        "chrome-win/chrome.exe",
+        "chrome-linux64/chrome",
+        "chrome-linux/chrome",
+    )
     candidates: list[Path] = []
     try:
         for d in root.glob("chromium-*"):
-            for name in ("chrome-win64/chrome.exe", "chrome-win/chrome.exe"):
+            for name in names:
                 exe = d / name.replace("/", os.sep)
                 if exe.is_file():
                     candidates.append(exe)
@@ -38,7 +45,10 @@ def ensure_playwright_browsers_path() -> str | None:
     """Fix PLAYWRIGHT_BROWSERS_PATH; return the path used (or None = Playwright default)."""
     local = Path(os.environ.get("LOCALAPPDATA") or "") / "ms-playwright"
     home = Path.home() / "AppData" / "Local" / "ms-playwright"
-    preferred_roots = [local, home]
+    # Linux / EC2 default (systemd sets APPLYFORME's cache path explicitly, but
+    # a CLI run outside the unit still needs the standard Playwright location).
+    linux = Path.home() / ".cache" / "ms-playwright"
+    preferred_roots = [local, home, linux]
 
     current = (os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "").strip()
     current_path = Path(current) if current else None

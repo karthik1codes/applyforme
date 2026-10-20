@@ -342,6 +342,17 @@ def _nudge_linkedin_email_signin(page: Page) -> None:
                 continue
 
 
+def _linkedin_auth_note() -> str:
+    """Explain a LinkedIn auth failure in terms the current worker can act on."""
+    if not _headed() and not firecrawl_enabled():
+        return (
+            "LinkedIn sign-in required — this worker runs headless, so there is no window "
+            "to sign in. Use a Firecrawl live-view session or sign in once in a headed "
+            "browser; then click Prepare again."
+        )
+    return "Sign-in timed out — sign in once in the browser window, then click Prepare again"
+
+
 def _wait_linkedin_login(
     page: Page, job: Job, *, force: bool = False, deadline: float | None = None
 ) -> bool:
@@ -1326,6 +1337,21 @@ def _result_for_state(machine: ApplyStateMachine) -> tuple[str, str]:
     return "errors", machine.last_error or "application did not reach a terminal state"
 
 
+def _mark_profile_ready(machine: ApplyStateMachine, resume_name: str) -> None:
+    """Move pre-browser states to PROFILE_READY.
+
+    ``resume()`` normalizes every interrupted browser phase to
+    BROWSER_INITIALIZED.  Re-entering PROFILE_READY from there would be a graph
+    violation (and made every retry after a login wall fail).
+    """
+    if machine.state in (ApplyState.JOB_SELECTED, ApplyState.JOB_DETAILS_LOADED):
+        machine.transition(
+            ApplyState.PROFILE_READY,
+            result="profile",
+            detail=f"resume={resume_name}",
+        )
+
+
 def apply(
     job: Job,
     profile: Profile,
@@ -1398,11 +1424,7 @@ def apply(
             machine.start()
         else:
             machine.resume()
-        if machine.state in (
-            ApplyState.JOB_SELECTED, ApplyState.JOB_DETAILS_LOADED, ApplyState.IDLE,
-            ApplyState.RETRY_PENDING, ApplyState.BROWSER_INITIALIZED,
-        ):
-            machine.transition(ApplyState.PROFILE_READY, result="profile", detail=f"resume={resume.name}")
+        _mark_profile_ready(machine, resume.name)
 
         try:
             if firecrawl_enabled():
@@ -1795,8 +1817,9 @@ def _apply_in_browser(
             machine.transition(ApplyState.AUTHENTICATION_REQUIRED, result="auth", detail=why)
             _write_live(job, page, "linkedin_login", why)
             if not _wait_linkedin_login(page, job, force=True, deadline=deadline):
-                machine.last_error = "sign-in timed out"
-                return "manual", "Sign-in timed out — sign in once in the browser window, then click Prepare again"
+                note = _linkedin_auth_note()
+                machine.last_error = note
+                return "manual", note
             machine.transition(ApplyState.APPLICATION_PAGE_READY, result="auth_ok", detail="signed in")
         elif kind == "closed":
             machine.transition(ApplyState.FAILED, result="closed", detail=why)
@@ -1818,8 +1841,9 @@ def _apply_in_browser(
         if _linkedin_needs_auth(page):
             machine.transition(ApplyState.AUTHENTICATION_REQUIRED, result="auth", detail="LinkedIn sign-in required")
             if not _wait_linkedin_login(page, job, force=True, deadline=deadline):
-                machine.last_error = "sign-in timed out"
-                return "manual", "Sign into LinkedIn in the browser window, then click Prepare again"
+                note = _linkedin_auth_note()
+                machine.last_error = note
+                return "manual", note
             machine.transition(ApplyState.APPLICATION_PAGE_READY, result="auth_ok", detail="signed in")
         if _easy_apply_modal_open(page):
             easy = True
@@ -1833,8 +1857,9 @@ def _apply_in_browser(
             if _linkedin_needs_auth(page):
                 machine.transition(ApplyState.AUTHENTICATION_REQUIRED, result="auth", detail="sign-in modal after Apply")
                 if not _wait_linkedin_login(page, job, force=True, deadline=deadline):
-                    machine.last_error = "sign-in timed out"
-                    return "manual", "Sign into LinkedIn, then click Prepare again"
+                    note = _linkedin_auth_note()
+                    machine.last_error = note
+                    return "manual", note
                 # Re-open the job page without losing the sign-in; never trust
                 # a stale modal after an auth redirect.
                 machine.transition(ApplyState.NAVIGATING, result="reload", detail=target[:300])
@@ -1851,8 +1876,9 @@ def _apply_in_browser(
                 if _linkedin_needs_auth(page):
                     machine.transition(ApplyState.AUTHENTICATION_REQUIRED, result="auth", detail="LinkedIn sign-in required")
                     if not _wait_linkedin_login(page, job, force=True, deadline=deadline):
-                        machine.last_error = "sign-in timed out"
-                        return "manual", "Sign into LinkedIn, then click Prepare again"
+                        note = _linkedin_auth_note()
+                        machine.last_error = note
+                        return "manual", note
             else:
                 machine.transition(
                     ApplyState.HUMAN_INTERVENTION_REQUIRED,
