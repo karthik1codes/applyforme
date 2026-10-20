@@ -114,6 +114,38 @@ def test_the_search_page_guard_only_applies_on_linkedin():
     assert "not_a_form" in src
 
 
+def test_a_success_toast_is_not_a_validation_error():
+    """Observed live: clicking Apply showed a success toast.
+
+    "Job moved to In progress under Clicked apply." is a *status* banner, but
+    the error selector read it as a validation error and the agent stopped
+    with "form needs your input".  The detector must ignore informational
+    notifications.
+    """
+    from applyforme.agents.applier import VISIBLE_ERRORS_JS
+
+    assert "informational" in VISIBLE_ERRORS_JS
+    assert "job moved to" in VISIBLE_ERRORS_JS.lower()
+    assert "toast" in VISIBLE_ERRORS_JS.lower()
+    assert "role=" in VISIBLE_ERRORS_JS
+
+
+def test_easy_apply_does_not_fall_back_to_an_external_apply_button():
+    """Only a real Easy Apply control may return True from _click_easy_apply.
+
+    A posting that says "Apply on company website" must be handled by
+    _click_external_apply, which follows the link to the employer's site.
+    Returning True for it made the caller believe a modal had opened, so the
+    agent filled the LinkedIn page instead of the employer's form.
+    """
+    from applyforme.agents.applier import _EASY_APPLY_TARGET_JS
+
+    # Easy mode only accepts an "Easy Apply" control.
+    assert "cands.find(isEasy)" in _EASY_APPLY_TARGET_JS
+    assert "preferEasy" in _EASY_APPLY_TARGET_JS
+
+
+
 
 def test_the_easy_apply_button_is_scoped_to_the_target_job_id():
     """The click must target the control that belongs to the target posting.

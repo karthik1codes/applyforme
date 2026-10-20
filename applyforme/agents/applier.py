@@ -419,30 +419,31 @@ def _wait_linkedin_login(
 
 
 def _click_easy_apply(page: Page, target_job_id: str = "") -> bool:
-    """Open the Apply control of the **target** posting on LinkedIn.
+    """Open the **Easy Apply** modal of the target posting on LinkedIn.
+
+    Only a genuine "Easy Apply" control counts.  A posting that says "Apply
+    on company website" is handled by :func:`_click_external_apply`, which
+    follows the link to the employer's site.  Returning True for an external
+    Apply would make the caller believe a modal opened, and the agent would
+    then fill whatever fields it found on the LinkedIn page instead of the
+    employer's application form.
 
     The button must belong to the posting we were asked to apply to, not to
     one of the "similar jobs" cards in the side rail.  Clicking a similar-jobs
-    card opens a completely different posting, and the agent would then fill
-    somebody else's application form — observed live on job 4479232422.
-
-    The button is located by id: we start from the target posting's own link
-    and stay inside the card that holds only that posting.  An unscoped
-    "Apply" lookup is never used, because the similar-jobs rail has one too.
+    card opens a completely different posting — observed live on job
+    4479232422.
     """
     import re
 
     if target_job_id:
-        for prefer_easy in (True, False):
-            try:
-                marked = page.evaluate(
-                    _EASY_APPLY_TARGET_JS,
-                    {"jobId": target_job_id, "marker": "data-afm-apply", "preferEasy": prefer_easy},
-                )
-            except Exception:
-                marked = False
-            if not marked:
-                continue
+        try:
+            marked = page.evaluate(
+                _EASY_APPLY_TARGET_JS,
+                {"jobId": target_job_id, "marker": "data-afm-apply", "preferEasy": True},
+            )
+        except Exception:
+            marked = False
+        if marked:
             try:
                 loc = page.locator("[data-afm-apply]")
                 if loc.count() and loc.first.is_visible():
@@ -1363,13 +1364,28 @@ def _is_required(f: FormField) -> bool:
 
 
 VISIBLE_ERRORS_JS = r"""
-() => [...document.querySelectorAll('[aria-invalid="true"], [role="alert"], .error, .errors, .field-error, [class*="error-message"], [class*="invalid"], [data-test-form-element-error]')]
+() => {
+  // A success toast is not a validation error.  Observed live: clicking
+  // Apply on a LinkedIn posting shows "Job moved to In progress under
+  // Clicked apply." in a toast, which the old selector read as an error
+  // and the agent then stopped on.  Notification containers and
+  // role="status" are informational, so they are excluded.
+  const informational = (e) => {
+    if (e.closest('[role="status"], [class*="toast" i], [class*="notification" i], [class*="snackbar" i], [class*="success" i], [class*="confirmation" i]')) return true;
+    const t = ((e.innerText || '') + '').trim().toLowerCase();
+    if (!t) return false;
+    return t.startsWith('job moved to') || t.startsWith('successfully') || t.startsWith('✓');
+  };
+  return [...document.querySelectorAll('[aria-invalid="true"], [role="alert"], .error, .errors, .field-error, [class*="error-message"], [class*="invalid"], [data-test-form-element-error]')]
   .filter(e => {
     const r = e.getBoundingClientRect();
-    return r.width > 0 && r.height > 0 && ((e.innerText || '').trim() || e.getAttribute('aria-invalid') === 'true');
+    if (!(r.width > 0 && r.height > 0)) return false;
+    if (!((e.innerText || '').trim() || e.getAttribute('aria-invalid') === 'true')) return false;
+    return !informational(e);
   })
   .map(e => ((e.innerText || e.getAttribute('aria-label') || '').trim()).slice(0, 160))
   .filter(Boolean)
+}
 """
 
 
