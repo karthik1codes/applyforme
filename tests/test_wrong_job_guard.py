@@ -130,6 +130,35 @@ def test_a_success_toast_is_not_a_validation_error():
     assert "role=" in VISIBLE_ERRORS_JS
 
 
+def test_a_linkedin_listing_is_detected():
+    """A listing page must be recognised, but a posting or redirect must not."""
+    from applyforme.agents.applier import _is_linkedin_listing
+
+    # A job listing is not an application form.
+    assert _is_linkedin_listing(
+        "https://www.linkedin.com/jobs/search-results/?currentJobId=4471344068"
+    )
+    # A single posting is fine.
+    assert not _is_linkedin_listing("https://www.linkedin.com/jobs/view/4479232422/")
+    # The safety redirect carries the browser to the employer's site.
+    assert not _is_linkedin_listing(
+        "https://www.linkedin.com/safety/go/?url=https%3A%2F%2Finternshala.com%2Fx"
+    )
+    # A non-LinkedIn ATS is never a listing.
+    assert not _is_linkedin_listing("https://internshala.com/internship/x")
+
+
+def test_the_agent_waits_for_the_employer_site_redirect():
+    """linkedin.com/safety/go still looks like LinkedIn, so the hop is awaited."""
+    import inspect
+
+    from applyforme.agents.applier import _wait_for_employer_site
+
+    src = inspect.getsource(_wait_for_employer_site)
+    assert "_is_linkedin(url)" in src
+    assert "wait_for_page_ready" in src
+
+
 def test_easy_apply_does_not_fall_back_to_an_external_apply_button():
     """Only a real Easy Apply control may return True from _click_easy_apply.
 

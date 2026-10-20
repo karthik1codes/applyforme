@@ -273,6 +273,34 @@ def _is_linkedin(url: str) -> bool:
     return "linkedin.com" in (url or "").lower()
 
 
+def _is_linkedin_listing(url: str) -> bool:
+    """True for a LinkedIn *listing* page (search results, job collections).
+
+    Not true for a single posting (``/jobs/view/<id>``) and not true for the
+    ``/safety/go/`` redirect that carries the browser off to an employer's
+    site.  Only a listing page presents the search box and filter fields that
+    the agent must never mistake for an application form.
+    """
+    u = (url or "").lower()
+    if "linkedin.com" not in u:
+        return False
+    if "/safety/go" in u or "/safety/" in u:
+        return False
+    if "/jobs/view/" in u:
+        return False
+    return any(
+        p in u
+        for p in (
+            "/jobs/search-results",
+            "/jobs/search?",
+            "/jobs/collections",
+            "/jobs/?",
+            "/jobs?",
+            "/search/results",
+        )
+    )
+
+
 def _linkedin_login_sec() -> int:
     try:
         return max(90, int(os.getenv("APPLYFORME_LINKEDIN_LOGIN_SEC", "300")))
@@ -2176,6 +2204,11 @@ def _apply_in_browser(
             if _click_external_apply(page, target_job_id):
                 page = _newest_page(page.context, before_pages)
                 wait_for_page_ready(page, timeout_ms=15000)
+                # "Apply on company website" goes through linkedin.com/safety/go
+                # and only then reaches the employer's site.  Wait for that
+                # hop, otherwise the agent would inspect the redirect page and
+                # give up before the real form appears.
+                page = _wait_for_employer_site(page, deadline=deadline)
                 if _linkedin_needs_auth(page):
                     machine.transition(ApplyState.AUTHENTICATION_REQUIRED, result="auth", detail="LinkedIn sign-in required")
                     if not _wait_linkedin_login(page, job, force=True, deadline=deadline, headed=headed):
@@ -2217,17 +2250,25 @@ def _apply_in_browser(
         _watch_filled_form(page, job, min(45, _watch_seconds() or 45), deadline)
         return "manual", "no form detected — use the Chromium window (LinkedIn Easy Apply may need a manual sign-in)"
 
-    # A LinkedIn *search-results* page has form fields (the search box, the
+    # A LinkedIn *job listing* page has form fields (the search box, the
     # filters) but it is not an application form.  Filling it is how the
     # agent ends up "applying" to whatever card is selected.  The Easy Apply
     # modal is the only place a LinkedIn application form lives.
     #
-    # This only applies while the browser is still on linkedin.com: a posting
-    # that says "Apply on company website" sends the browser to the employer's
-    # ATS, and that form is exactly what we want to fill.
-    if linkedin and not easy and _is_linkedin(page.url) and not _easy_apply_modal_open(page):
+    # The check is deliberately narrow.  "Apply on company website" sends the
+    # browser through linkedin.com/safety/go/... to the employer's site, and
+    # that redirect is still on the linkedin.com host for a moment — treating
+    # any linkedin.com URL as a listing page would block every employer-ATS
+    # application.
+    if (
+        linkedin
+        and not easy
+        and _is_linkedin(page.url)
+        and _is_linkedin_listing(page.url)
+        and not _easy_apply_modal_open(page)
+    ):
         detail = (
-            "the browser is on a LinkedIn search page, not the Easy Apply form for "
+            "the browser is on a LinkedIn job listing, not the application form for "
             f"{job.title} — not filling it"
         )
         machine.transition(ApplyState.HUMAN_INTERVENTION_REQUIRED, result="not_a_form", detail=detail)
@@ -2354,6 +2395,48 @@ def _apply_in_browser(
         dry_run=dry_run, auto_submit=auto_submit, headed=headed,
         deadline=deadline, url_before=url_before,
     )
+
+
+def _wait_for_employer_site(page: Page, *, deadline: float | None = None, timeout_sec: int = 25) -> Page:
+    """Wait until LinkedIn has handed the browser over to the employer's site.
+
+    "Apply on company website" points at ``linkedin.com/safety/go/?url=...``,
+    which is still on the linkedin.com host and then redirects on.  The agent
+    must wait for that hop, otherwise it inspects the interstitial and gives
+    up before the real application form is on screen.
+    """
+    end = time.time() + max(3, timeout_sec)
+    while time.time() < end:
+        if deadline is not None and time.time() >= deadline:
+            break
+        try:
+            url = page.url or ""
+        except Exception:
+            url = ""
+        if url and not _is_linkedin(url):
+            try:
+                wait_for_page_ready(page, timeout_ms=8000)
+            except Exception:
+                pass
+            return page
+        # Also accept a new tab that already left LinkedIn.
+        try:
+            for p in reversed(page.context.pages):
+                u = p.url or ""
+                if u and not _is_linkedin(u):
+                    p.bring_to_front()
+                    try:
+                        wait_for_page_ready(p, timeout_ms=8000)
+                    except Exception:
+                        pass
+                    return p
+        except Exception:
+            pass
+        try:
+            page.wait_for_timeout(1000)
+        except Exception:
+            break
+    return page
 
 
 def _newest_page(context, before: list):
