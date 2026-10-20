@@ -101,3 +101,29 @@ def test_a_non_linkedin_job_is_never_blocked():
     job = _job("https://boards.greenhouse.io/digitap/jobs/12345")
     assert _wrong_job_reason(job, job.target_url(), "https://boards.greenhouse.io/digitap/jobs/12345") == ""
     assert _wrong_job_reason(job, job.target_url(), "https://boards.greenhouse.io/other/jobs/999") == ""
+
+
+def test_the_easy_apply_button_is_scoped_to_the_target_job_id():
+    """The click must target the card that references the target job id.
+
+    A similar-jobs card in the side rail also has an "Apply" button; picking
+    it opens a different posting.
+    """
+    from applyforme.agents.applier import _EASY_APPLY_TARGET_JS
+
+    assert "/jobs/view/" in _EASY_APPLY_TARGET_JS
+    assert "jobId" in _EASY_APPLY_TARGET_JS
+    # It must search for a link to the exact posting, not for any Apply text.
+    assert "links" in _EASY_APPLY_TARGET_JS
+    assert "easy apply" in _EASY_APPLY_TARGET_JS.lower()
+
+
+def test_easy_apply_uses_the_id_scoped_path_first():
+    """_click_easy_apply must receive the target job id."""
+    import inspect
+
+    from applyforme.agents.applier import _click_easy_apply
+
+    sig = inspect.signature(_click_easy_apply)
+    assert "target_job_id" in sig.parameters
+

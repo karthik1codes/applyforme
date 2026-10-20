@@ -418,16 +418,37 @@ def _wait_linkedin_login(
     return False
 
 
-def _click_easy_apply(page: Page) -> bool:
+def _click_easy_apply(page: Page, target_job_id: str = "") -> bool:
     """Open LinkedIn Easy Apply modal only (not external company Apply).
 
-    The button must belong to the **main job card**, not to one of the
+    The button must belong to the **target posting**, not to one of the
     "similar jobs" cards in the side rail.  Clicking a similar-jobs card
     opens a completely different posting, and the agent would then fill
-    somebody else's application form.  The main card is the first
-    ``jobs-apply-button`` inside the job detail pane.
+    somebody else's application form — observed live on job 4479232422.
+
+    So the button is located by *id*: we look for the job card that
+    references the target job id and click the Apply button inside that
+    card.  Only if that fails do we fall back to the main pane, and the
+    caller re-checks the job id after the click.
     """
     import re
+
+    if target_job_id:
+        try:
+            marked = page.evaluate(
+                _EASY_APPLY_TARGET_JS, {"jobId": target_job_id, "marker": "data-afm-easy-apply"}
+            )
+        except Exception:
+            marked = False
+        if marked:
+            try:
+                loc = page.locator("[data-afm-easy-apply]")
+                if loc.count() and loc.first.is_visible():
+                    loc.first.click(timeout=5000)
+                    page.wait_for_timeout(2000)
+                    return True
+            except Exception:
+                pass
 
     # Scope to the main job detail pane so the side rail is excluded.
     panes = [
@@ -461,6 +482,38 @@ def _click_easy_apply(page: Page) -> bool:
         except Exception:
             continue
     return False
+
+
+# Marks the Apply button that belongs to the job card referencing the target
+# job id.  The card is found by walking up from a link to that posting, so a
+# "similar jobs" card can never be selected.
+_EASY_APPLY_TARGET_JS = """
+({ jobId, marker }) => {
+  const want = String(jobId || '').trim();
+  if (!want) return false;
+  const path = `/jobs/view/${want}`;
+  const links = Array.from(document.querySelectorAll(`a[href*="${path}"]`));
+  if (!links.length) return false;
+  const isApply = (el) => {
+    const t = ((el.innerText || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase();
+    return t.includes('easy apply') || el.className.includes('jobs-apply-button');
+  };
+  for (const link of links) {
+    let node = link;
+    for (let up = 0; up < 12 && node; up++) {
+      const buttons = Array.from(node.querySelectorAll('button, a')).filter(isApply);
+      const hit = buttons.find((b) => b.offsetParent !== null);
+      if (hit) {
+        hit.setAttribute(marker, '1');
+        hit.scrollIntoView({ block: 'center' });
+        return true;
+      }
+      node = node.parentElement;
+    }
+  }
+  return false;
+}
+"""
 
 
 def _linkedin_job_id(url: str) -> str:
@@ -1958,6 +2011,7 @@ def _apply_in_browser(
     # LinkedIn may show the sign-in modal only after clicking Apply.
     easy = False
     if linkedin:
+        target_job_id = _linkedin_job_id(target)
         if _linkedin_needs_auth(page):
             machine.transition(ApplyState.AUTHENTICATION_REQUIRED, result="auth", detail="LinkedIn sign-in required")
             if not _wait_linkedin_login(page, job, force=True, deadline=deadline, headed=headed):
@@ -1965,6 +2019,11 @@ def _apply_in_browser(
                 machine.last_error = note
                 return "manual", note
             machine.transition(ApplyState.APPLICATION_PAGE_READY, result="auth_ok", detail="signed in")
+            # Signing in drops the user on a search page, not on the posting.
+            # Go back to the exact posting before touching any Apply button.
+            machine.transition(ApplyState.NAVIGATING, result="reload", detail=target[:300])
+            page.goto(target, wait_until="domcontentloaded", timeout=60000)
+            wait_for_page_ready(page, timeout_ms=10000)
         # Signing in can land on a search-results page with a *different* job
         # selected.  Never fill that one.
         wrong = _page_shows_target_job(page, job, target)
@@ -1977,14 +2036,34 @@ def _apply_in_browser(
             print("[applier] LinkedIn Easy Apply modal already open")
         else:
             _write_live(job, page, "easy_apply", "Looking for Easy Apply…")
-            easy = _click_easy_apply(page)
+            easy = _click_easy_apply(page, target_job_id)
             wait_for_page_ready(page, timeout_ms=6000)
             # The click can open a different posting (similar-jobs rail).
             wrong = _page_shows_target_job(page, job, target)
             if wrong:
-                machine.transition(ApplyState.HUMAN_INTERVENTION_REQUIRED, result="wrong_job", detail=wrong)
-                _write_live(job, page, "manual", wrong)
-                return "manual", wrong
+                # Recover: reload the exact posting and try the id-scoped
+                # button once.  Giving up here would strand the job.
+                print(f"[applier] {wrong} — reloading the target posting and retrying once")
+                machine.retry("Easy Apply opened a different job; retrying on the target posting")
+                machine.transition(ApplyState.NAVIGATING, result="reload", detail=target[:300])
+                try:
+                    page.goto(target, wait_until="domcontentloaded", timeout=60000)
+                    wait_for_page_ready(page, timeout_ms=10000)
+                except Exception as e:
+                    detail = f"could not reload the target posting: {e}"
+                    machine.transition(ApplyState.HUMAN_INTERVENTION_REQUIRED, result="wrong_job", detail=detail)
+                    _write_live(job, page, "manual", detail)
+                    return "manual", detail
+                if _easy_apply_modal_open(page):
+                    easy = True
+                else:
+                    easy = _click_easy_apply(page, target_job_id)
+                    wait_for_page_ready(page, timeout_ms=6000)
+                wrong = _page_shows_target_job(page, job, target)
+                if wrong:
+                    machine.transition(ApplyState.HUMAN_INTERVENTION_REQUIRED, result="wrong_job", detail=wrong)
+                    _write_live(job, page, "manual", wrong)
+                    return "manual", wrong
         if easy:
             print("[applier] LinkedIn Easy Apply opened")
             if _linkedin_needs_auth(page):
@@ -1998,7 +2077,7 @@ def _apply_in_browser(
                 machine.transition(ApplyState.NAVIGATING, result="reload", detail=target[:300])
                 page.goto(target, wait_until="domcontentloaded", timeout=60000)
                 wait_for_page_ready(page, timeout_ms=10000)
-                easy = _click_easy_apply(page)
+                easy = _click_easy_apply(page, target_job_id)
         else:
             print("[applier] No Easy Apply — this posting uses company-site Apply")
             _write_live(job, page, "external_apply", "Opening company Apply page…")
@@ -2046,6 +2125,19 @@ def _apply_in_browser(
         _write_live(job, page, "manual", "no form detected — finish in Chromium or retry")
         _watch_filled_form(page, job, min(45, _watch_seconds() or 45), deadline)
         return "manual", "no form detected — use the Chromium window (LinkedIn Easy Apply may need a manual sign-in)"
+
+    # A LinkedIn *search-results* page has form fields (the search box, the
+    # filters) but it is not an application form.  Filling it is how the
+    # agent ends up "applying" to whatever card is selected.  The Easy Apply
+    # modal is the only place a LinkedIn application form lives.
+    if linkedin and not easy and not _easy_apply_modal_open(page):
+        detail = (
+            "the browser is on a LinkedIn search page, not the Easy Apply form for "
+            f"{job.title} — not filling it"
+        )
+        machine.transition(ApplyState.HUMAN_INTERVENTION_REQUIRED, result="not_a_form", detail=detail)
+        _write_live(job, page, "manual", detail)
+        return "manual", detail
 
     machine.transition(ApplyState.FORM_DETECTED, result="form", detail=f"{len(fields)} fields")
     machine.reset_observation()
